@@ -1,0 +1,437 @@
+{
+  "model": "jev-1.13.0",
+  "documents": [
+    {
+      "file": "320193_000032019325000079_aapl-20250927.htm",
+      "label_sector": "technology",
+      "label_doc_type": "annual-report",
+      "label_going_concern": "",
+      "full_chars": 202394,
+      "sent_chars": 80000,
+      "input_tokens": 15650,
+      "chars_per_token": 5.24,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "technology",
+          "confidence": 1.0,
+          "probabilities": {
+            "consumer-discretionary": 0.0,
+            "materials": 0.0,
+            "health-care": 0.0,
+            "industrials": 0.0,
+            "technology": 1.0,
+            "financials": 0.0,
+            "other": 0.0,
+            "communication": 0.0,
+            "consumer-staples": 0.0,
+            "energy": 0.0,
+            "utilities": 0.0,
+            "real-estate": 0.0
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "annual-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "annual-report": 1.0,
+            "quarterly-report": 0.0,
+            "current-report": 0.0,
+            "proxy-statement": 0.0,
+            "other": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 0.01
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.03
+        },
+        "outlook": {
+          "type": "score",
+          "score": 1.05,
+          "confidence": 0.95,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.0,
+            "1": 0.95,
+            "2": 0.05,
+            "3": 0.0,
+            "4": 0.0
+          }
+        }
+      }
+    },
+    {
+      "file": "19617_000162828026008131_jpm-20251231.htm",
+      "label_sector": "financials",
+      "label_doc_type": "annual-report",
+      "label_going_concern": "",
+      "full_chars": 777445,
+      "sent_chars": 80000,
+      "input_tokens": 16831,
+      "chars_per_token": 4.88,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "financials",
+          "confidence": 1.0,
+          "probabilities": {
+            "industrials": 0.0,
+            "real-estate": 0.0,
+            "utilities": 0.0,
+            "communication": 0.0,
+            "consumer-staples": 0.0,
+            "other": 0.0,
+            "technology": 0.0,
+            "consumer-discretionary": 0.0,
+            "health-care": 0.0,
+            "financials": 1.0,
+            "materials": 0.0,
+            "energy": 0.0
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "annual-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "other": 0.0,
+            "current-report": 0.0,
+            "annual-report": 1.0,
+            "proxy-statement": 0.0,
+            "quarterly-report": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 0.01
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.03
+        },
+        "outlook": {
+          "type": "score",
+          "score": 1.25,
+          "confidence": 0.79,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.0,
+            "1": 0.76,
+            "2": 0.23,
+            "3": 0.01,
+            "4": 0.0
+          }
+        }
+      }
+    },
+    {
+      "file": "1045810_000104581026000078_nvda-20260902.htm",
+      "label_sector": "technology",
+      "label_doc_type": "current-report",
+      "label_going_concern": "",
+      "full_chars": 8024,
+      "sent_chars": 8024,
+      "input_tokens": 2693,
+      "chars_per_token": 3.05,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "technology",
+          "confidence": 1.0,
+          "probabilities": {
+            "utilities": 0.0,
+            "technology": 1.0,
+            "real-estate": 0.0,
+            "financials": 0.0,
+            "communication": 0.0,
+            "consumer-discretionary": 0.0,
+            "consumer-staples": 0.0,
+            "materials": 0.0,
+            "industrials": 0.0,
+            "other": 0.0,
+            "health-care": 0.0,
+            "energy": 0.0
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "current-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "current-report": 1.0,
+            "proxy-statement": 0.0,
+            "other": 0.0,
+            "annual-report": 0.0,
+            "quarterly-report": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 0.01
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.01
+        },
+        "outlook": {
+          "type": "score",
+          "score": 2.32,
+          "confidence": 0.35,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.0,
+            "1": 0.25,
+            "2": 0.24,
+            "3": 0.46,
+            "4": 0.05
+          }
+        }
+      }
+    },
+    {
+      "file": "1045609_000119312526051453_pld-20251231.htm",
+      "label_sector": "real-estate",
+      "label_doc_type": "annual-report",
+      "label_going_concern": "",
+      "full_chars": 450240,
+      "sent_chars": 80000,
+      "input_tokens": 17144,
+      "chars_per_token": 4.74,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "real-estate",
+          "confidence": 1.0,
+          "probabilities": {
+            "financials": 0.0,
+            "consumer-staples": 0.0,
+            "energy": 0.0,
+            "communication": 0.0,
+            "consumer-discretionary": 0.0,
+            "materials": 0.0,
+            "industrials": 0.0,
+            "technology": 0.0,
+            "other": 0.0,
+            "utilities": 0.0,
+            "health-care": 0.0,
+            "real-estate": 1.0
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "annual-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "other": 0.0,
+            "proxy-statement": 0.0,
+            "annual-report": 1.0,
+            "current-report": 0.0,
+            "quarterly-report": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 0.01
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.03
+        },
+        "outlook": {
+          "type": "score",
+          "score": 3.06,
+          "confidence": 0.82,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.0,
+            "1": 0.01,
+            "2": 0.06,
+            "3": 0.79,
+            "4": 0.14
+          }
+        }
+      }
+    },
+    {
+      "file": "1696411_000147793225001313_crona_10k.htm",
+      "label_sector": "industrials",
+      "label_doc_type": "annual-report",
+      "label_going_concern": "likely",
+      "full_chars": 63561,
+      "sent_chars": 63561,
+      "input_tokens": 16802,
+      "chars_per_token": 3.83,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "consumer-discretionary",
+          "confidence": 0.43,
+          "probabilities": {
+            "technology": 0.0,
+            "energy": 0.0,
+            "consumer-staples": 0.01,
+            "utilities": 0.0,
+            "materials": 0.0,
+            "communication": 0.0,
+            "financials": 0.0,
+            "real-estate": 0.0,
+            "industrials": 0.04,
+            "consumer-discretionary": 0.48,
+            "other": 0.46,
+            "health-care": 0.01
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "annual-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "annual-report": 1.0,
+            "proxy-statement": 0.0,
+            "current-report": 0.0,
+            "other": 0.0,
+            "quarterly-report": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 0.99
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.99
+        },
+        "outlook": {
+          "type": "score",
+          "score": 0.03,
+          "confidence": 0.98,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.99,
+            "1": 0.01,
+            "2": 0.0,
+            "3": 0.0,
+            "4": 0.0
+          }
+        }
+      }
+    },
+    {
+      "file": "1392449_000165495426003081_gplb_10k.htm",
+      "label_sector": "health-care",
+      "label_doc_type": "annual-report",
+      "label_going_concern": "likely",
+      "full_chars": 51840,
+      "sent_chars": 51840,
+      "input_tokens": 12599,
+      "chars_per_token": 4.18,
+      "model": "jev-1.13.0",
+      "answers": {
+        "sector": {
+          "type": "choice",
+          "choice": "other",
+          "confidence": 1.0,
+          "probabilities": {
+            "utilities": 0.0,
+            "materials": 0.0,
+            "industrials": 0.0,
+            "consumer-discretionary": 0.0,
+            "communication": 0.0,
+            "energy": 0.0,
+            "other": 1.0,
+            "real-estate": 0.0,
+            "financials": 0.0,
+            "technology": 0.0,
+            "consumer-staples": 0.0,
+            "health-care": 0.0
+          }
+        },
+        "doc_type": {
+          "type": "choice",
+          "choice": "annual-report",
+          "confidence": 1.0,
+          "probabilities": {
+            "annual-report": 1.0,
+            "proxy-statement": 0.0,
+            "quarterly-report": 0.0,
+            "current-report": 0.0,
+            "other": 0.0
+          }
+        },
+        "going_concern": {
+          "type": "noul",
+          "noul": 1.0
+        },
+        "material_weakness": {
+          "type": "noul",
+          "noul": 0.02
+        },
+        "outlook": {
+          "type": "score",
+          "score": 0.02,
+          "confidence": 0.98,
+          "legend": {
+            "0": "Clearly negative: losses, shrinking business, financing trouble or doubt about survival",
+            "1": "Cautious: notable headwinds or risks dominate the discussion",
+            "2": "Mixed or neutral: no clear lean either way",
+            "3": "Positive: growth or improving results are emphasised",
+            "4": "Strongly positive: strong growth and confident forward statements"
+          },
+          "probabilities": {
+            "0": 0.99,
+            "1": 0.01,
+            "2": 0.0,
+            "3": 0.0,
+            "4": 0.0
+          }
+        }
+      }
+    }
+  ],
+  "over_limit": {
+    "chars": 250000,
+    "outcome": "error",
+    "status": 400,
+    "message": "POST https://api.typesafe.ai/v1/systemone: 400 {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}} (request_id=req_01a1027bdc0c70829b5ae7d2e58c2f8f)"
+  }
+}
