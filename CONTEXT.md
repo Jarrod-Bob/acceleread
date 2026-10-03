@@ -12,7 +12,7 @@ _Avoid_: File, article, item
 A single page of a Document, the unit at which extraction method is decided.
 
 **Section**:
-A named, contiguous part of a Document (e.g. a filing's "Risk Factors"), used to choose what text a Classifier sees.
+A named, contiguous part of a Document (e.g. a filing's "Risk Factors"), used to choose what text a Classifier sees. Its name is a form-independent key (such as `risk_factors`), so the same part of a 10-K, 10-Q, 20-F or annual report shares one name. A Document may have several Sections with the same key.
 _Avoid_: Chunk, part, segment
 
 **Extraction**:
