@@ -5,7 +5,7 @@ Turns documents into structured, classified records quickly and cheaply, for peo
 ## Ingestion
 
 **Document**:
-One source file submitted for ingestion (a PDF or HTML file in v0).
+One source file submitted for ingestion (a PDF or HTML file in v0). An exhibit filed alongside a filing is its own Document.
 _Avoid_: File, article, item
 
 **Page**:
@@ -28,8 +28,12 @@ A cheap Classifier judgment that confirms or rejects a detected Section before Q
 _Avoid_: Validation, QA, check
 
 **Document Record**:
-The structured output of ingesting one Document: its extracted text, page metadata, and Classification.
+The structured output of ingesting one Document: its extracted text, Pages, Sections, metadata, Classification and Answers. Every Document yields exactly one, even when ingestion fails.
 _Avoid_: Result, output, doc
+
+**Coverage**:
+The part of a Document a single Classification or Answer actually read (which Sections or Pages, and whether it was truncated).
+_Avoid_: Context, window, scope
 
 **Job**:
 A batch of Documents ingested together against one Taxonomy.
