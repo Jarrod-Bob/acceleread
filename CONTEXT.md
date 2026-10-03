@@ -39,6 +39,10 @@ _Avoid_: Context, window, scope
 A batch of Documents ingested together, judged against at most one Taxonomy and any number of Questions (at least one of either).
 _Avoid_: Run, batch, task
 
+**Workspace**:
+The directory where one machine keeps its Jobs, their Document Records and inputs, and the Judgment cache.
+_Avoid_: Home, data dir, store
+
 ## Classification
 
 **Taxonomy**:
