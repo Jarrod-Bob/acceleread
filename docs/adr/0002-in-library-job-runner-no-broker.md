@@ -8,6 +8,7 @@ v0 runs Jobs of 10k–100k Documents on one machine. Its runner lives inside the
 
 ## Consequences
 
-- We own crash handling: a `BrokenProcessPool` means rebuilding the pool, and each OCR worker's model load needs budgeting (spawn start method).
+- We own crash handling, and each OCR worker's model load needs budgeting (spawn start method).
+- **Amended:** extraction runs on our own small worker manager over `multiprocessing`, not `ProcessPoolExecutor`, because the executor can't kill one hung or oversized task without tearing down the whole pool. See [How many OCR workers run, and how does the pool recover from crashes?](https://github.com/Jarrod-Bob/acceleread/issues/18)
 - Distributed or multi-machine workers are out of scope. Adding them later means replacing this runner, not configuring it.
 - Details: [Which job queue and API framework fit single-machine batch ingestion?](https://github.com/Jarrod-Bob/acceleread/issues/5)
