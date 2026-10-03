@@ -50,11 +50,15 @@ One named, described option within a Taxonomy.
 _Avoid_: Label, class, tag
 
 **Classifier**:
-Anything that assigns a Classification to a Document Record given a Taxonomy; Jev is the default.
+Anything that answers Judgments about a piece of text; Jev is the default.
 _Avoid_: Model, engine
 
+**Judgment**:
+A single yes/no, graded or multiple-choice decision put to a Classifier, with its probabilities. Classifications, Answers and acceleread's own checks (such as Section Verification) are all Judgments.
+_Avoid_: Question (reserved for user-defined Judgments), query, prompt
+
 **Classification**:
-A Classifier's verdict on one Document: the chosen Category plus the full probability distribution and confidence.
+The Judgment over a Job's Taxonomy for one Document: the chosen Category plus the full probability distribution and confidence.
 _Avoid_: Prediction, label
 
 **Question**:
@@ -66,9 +70,9 @@ A named, versioned collection of Questions (and optionally a Taxonomy) that Jobs
 _Avoid_: Pack, template, preset
 
 **Answer**:
-A Classifier's response to one Question for one Document, with its probabilities.
+The Judgment for one Question on one Document, with its probabilities.
 _Avoid_: Result, score
 
 **Escalation**:
-Handing a low-confidence Classification to a more expensive Classifier (e.g. an LLM) or a human.
+Handing a low-confidence Classification or Answer to a more expensive Classifier (e.g. an LLM) or flagging it for a human.
 _Avoid_: Fallback, retry
