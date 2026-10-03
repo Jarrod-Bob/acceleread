@@ -1,0 +1,305 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Question: "What should the simple UI let a user do?" (wayfinder ticket #10)
+  Three structurally different UIs over the decided /v1 API, switchable via ?variant=A|B|C
+  and the floating bar (or ← →). Mock data from corpus/manifest.csv (data.js). Nothing persists; nothing hits a server.
+  Run: open prototype/ui/index.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acceleread UI prototype</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --ink:#1b1f24; --mute:#6a7380; --line:#e2e5ea; --acc:#2f5bea;
+          --warn:#b7791f; --warnbg:#fff6e5; --bad:#c53030; --badbg:#fdecec; --ok:#2f855a; --okbg:#e8f6ee; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--ink); }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:#fff; border-radius:6px; padding:5px 10px; }
+  button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+  input, select, textarea { font:inherit; border:1px solid var(--line); border-radius:6px; padding:5px 8px; background:#fff; }
+  .mute { color:var(--mute); } .small { font-size:12px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#fff; white-space:nowrap; }
+  .pill.warn { background:var(--warnbg); border-color:#f3d39b; color:var(--warn); }
+  .pill.bad { background:var(--badbg); border-color:#f5b5b5; color:var(--bad); }
+  .pill.ok { background:var(--okbg); border-color:#a9dcbf; color:var(--ok); }
+  .pill.acc { background:#eaf0ff; border-color:#bcd0ff; color:var(--acc); }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; display:flex; }
+  .bar > span { display:block; height:100%; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; color:var(--mute); font-weight:600; }
+  tr.click:hover { background:#f0f3ff; cursor:pointer; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+  h1,h2,h3 { margin:0; } h2 { font-size:16px; } h3 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); }
+  .dist div { display:grid; grid-template-columns:150px 1fr 44px; gap:8px; align-items:center; font-size:12px; margin:3px 0; }
+  .side-by-side { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  /* switcher */
+  #switcher { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); z-index:99; display:flex; gap:10px; align-items:center;
+              background:#111; color:#fff; padding:6px 10px; border-radius:999px; box-shadow:0 6px 24px rgba(0,0,0,.35); font-size:13px; }
+  #switcher button { background:#333; color:#fff; border:none; border-radius:999px; padding:3px 10px; }
+  #apibox { position:fixed; bottom:16px; right:16px; z-index:98; max-width:340px; background:#111; color:#cfd6e0; font:11px/1.5 ui-monospace,Menlo,monospace;
+            padding:8px 10px; border-radius:8px; opacity:.92; }
+  #apibox b { color:#fff; }
+  #toast { position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#111; color:#fff; padding:6px 12px; border-radius:6px; display:none; z-index:100; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="apibox"></div>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+<div id="toast"></div>
+<script src="data.js"></script>
+<script>
+const M = window.MOCK, R = M.records;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const toast = m => { const t = $("#toast"); t.textContent = m; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2200); };
+const pct = x => x == null ? "—" : Math.round(x * 100) + "%";
+const escPill = e => e.status === "flagged" ? `<span class="pill warn">flagged</span>` : e.status === "escalated" ? `<span class="pill acc">escalated → LLM</span>` : "";
+const statusPill = r => r.status === "failed" ? `<span class="pill bad">failed</span>` : r.status === "done" ? `<span class="pill ok">done</span>` : `<span class="pill">${r.status}</span>`;
+const gcPill = r => r.answers && r.answers.going_concern.value > 0.5 ? `<span class="pill bad">going concern ${pct(r.answers.going_concern.value)}</span>` : "";
+const counts = () => ({
+  done: R.filter(r => r.status === "done").length, failed: R.filter(r => r.status === "failed").length,
+  flagged: R.filter(r => r.escalation.status === "flagged").length, escalated: R.filter(r => r.escalation.status === "escalated").length,
+  ocr: R.filter(r => r.pages_ocr).length, tokens: R.reduce((a, r) => a + r.tokens, 0),
+});
+// Simulated SSE: a live counter that ticks while "running"
+let live = { done: 44, total: 60 };
+setInterval(() => { if (live.done < live.total) { live.done++; document.dispatchEvent(new Event("tick")); } }, 1500);
+
+function distHTML(probs) {
+  if (!probs) return `<div class="small mute">No probabilities (LLM-escalated Judgment)</div>`;
+  return `<div class="dist">` + Object.entries(probs).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+    `<div><span>${esc(k)}</span><span class="bar"><span style="width:${v*100}%;background:var(--acc)"></span></span><span>${pct(v)}</span></div>`).join("") + `</div>`;
+}
+function answersHTML(r) {
+  if (!r.answers) return `<div class="pill bad">${esc(r.error)}</div>`;
+  const a = r.answers;
+  const row = (n, v, cov) => `<tr><td>${n}</td><td><b>${v}</b></td><td class="small mute">${esc(cov)}</td></tr>`;
+  return `<table>${row("doc_type", a.doc_type.value + ` <span class="mute">${pct(a.doc_type.confidence)}</span>`, a.doc_type.coverage)}
+    ${row("going_concern", a.going_concern.value == null ? "null" : pct(a.going_concern.value), a.going_concern.coverage)}
+    ${row("material_weakness", a.material_weakness.value == null ? "null" : pct(a.material_weakness.value), a.material_weakness.coverage)}
+    ${row("outlook (0–4)", a.outlook.value == null ? "null" : a.outlook.value, a.outlook.coverage)}</table>`;
+}
+function recordDetail(r, { review = false } = {}) {
+  const c = r.classification, e = r.escalation;
+  const first = e.first;
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
+      <div><h2>${esc(r.company)}</h2><div class="small mute">${r.form} · filed ${r.filed} · ${r.format.toUpperCase()}${r.pages_ocr ? ` · ${r.pages_ocr} Pages OCR'd` : ""} · ${r.tokens.toLocaleString()} tokens · attempts ${r.attempts}</div></div>
+      <div>${statusPill(r)} ${escPill(e)}</div>
+    </div>
+    ${e.reason ? `<div class="small" style="margin-top:6px;color:var(--warn)">⚑ ${esc(e.reason)}</div>` : ""}
+    ${c ? `<h3 style="margin-top:14px">Classification · sector</h3>
+      ${first ? `<div class="side-by-side" style="margin-top:6px">
+          <div class="panel" style="padding:8px"><div class="small mute">first pass · ${first.classifier}</div><b>${first.category}</b> ${pct(first.confidence)}${distHTML(first.probabilities)}<div class="small mute">coverage: ${first.coverage}</div></div>
+          <div class="panel" style="padding:8px;border-color:#bcd0ff"><div class="small mute">of record · claude-opus-5-5</div><b>${c.category}</b>${distHTML(null)}<div class="small mute">coverage: ${c.coverage}</div></div></div>`
+        : `<div style="margin-top:6px"><b>${c.category}</b> ${pct(c.confidence)} <span class="small mute">coverage: ${c.coverage}</span>${distHTML(c.probabilities)}</div>`}` : ""}
+    <h3 style="margin-top:14px">Answers</h3>${answersHTML(r)}
+    ${review ? "" : `<div style="margin-top:12px;display:flex;gap:6px">
+      ${r.status === "failed" ? `<button onclick="toast('POST /v1/jobs/{id}/retry {status: failed}')">Retry</button>` : ""}
+      <button onclick="toast('Opens Record JSON — GET /v1/jobs/{id}/records/${r.id}')">View JSON</button>
+      ${c ? `<select onchange="toast('STUB: correction → '+this.value+' (no correction concept in the spec yet)')"><option>Correct sector…</option>${M.sectors.map(s => `<option>${s}</option>`).join("")}</select>` : ""}</div>`}`;
+}
+function newJobForm() {
+  return `<div class="panel" style="padding:14px">
+    <h2>New Job</h2>
+    <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;margin-top:10px;align-items:center">
+      <label>Name</label><input value="q4 10-K batch">
+      <label>Taxonomy</label><select><option>sector (12 Categories) — from filing-risk v3</option><option>none</option><option>+ inline…</option></select>
+      <label>Question Sets</label><div><span class="pill">filing-risk v3 · 4 Questions</span> <button class="small">+ add file</button></div>
+      <label>Profile</label><select><option>fast</option><option>quality</option></select>
+      <label>escalate_below</label><input value="0.70" style="width:80px">
+      <label>LLM escalation</label><label><input type="checkbox"> claude-opus-5-5, max 2% of Documents</label>
+      <label>Documents</label><div style="border:2px dashed var(--line);padding:16px;border-radius:8px;text-align:center" class="mute">Drop files / folder, or paste URLs (one per line)</div>
+    </div>
+    <div class="panel" style="padding:8px;margin-top:10px;background:var(--warnbg);border-color:#f3d39b">
+      <div class="small"><b>jobs:validate</b> → ✓ unique names · ✓ <code>other</code> added to sector · ⚠ Question <code>outlook</code> instructions never mention <code>document</code> · ⚠ Taxonomy text 22% of budget</div></div>
+    <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end"><button>Save as job.yaml</button><button class="primary" onclick="toast('POST /v1/jobs → add documents → start; queued at position 3')">Queue Job</button></div></div>`;
+}
+
+/* ───────────── Variant A: Job console (ops / pipeline infra) ───────────── */
+const A = { name: "Job console", api: ["GET /v1/jobs (queue)", "GET /v1/jobs/{id} + SSE /events", "GET /v1/jobs/{id}/records?status&escalation.status&category", "POST /v1/jobs:validate, POST /v1/jobs", "POST …/cancel · …/resume · …/retry", "GET …/export (JSONL) · …/manifest"],
+  state: { filter: "all", sel: null, newJob: false },
+  render(el) {
+    const s = this.state, c = counts();
+    const rows = R.filter(r => s.filter === "all" ? true : s.filter === "flagged" ? r.escalation.status !== "none" : s.filter === "failed" ? r.status === "failed" : s.filter === "ocr" ? r.pages_ocr : r.classification?.category === s.filter);
+    const job = M.jobs[0];
+    el.innerHTML = `<div style="display:grid;grid-template-columns:260px 1fr ${s.sel ? "460px" : ""};height:100vh">
+      <aside style="border-right:1px solid var(--line);background:#fff;padding:12px;overflow:auto">
+        <div style="display:flex;justify-content:space-between;align-items:center"><b>acceleread</b><button class="primary" id="a-new">+ New Job</button></div>
+        <div class="small mute" style="margin:12px 0 6px">QUEUE (one runs at a time)</div>
+        ${M.jobs.map(j => `<div class="panel" style="padding:8px;margin-bottom:6px;${j.status === "running" ? "border-color:var(--acc)" : ""}">
+          <div style="display:flex;justify-content:space-between"><b class="small">${esc(j.name)}</b></div>
+          <div class="small mute">${j.total.toLocaleString()} docs · ${j.profile} · ${j.status === "queued" ? `#${j.position} in queue` : j.status}</div>
+          ${j.status === "running" ? `<div class="bar" style="margin-top:6px"><span style="width:${live.done / live.total * 100}%;background:var(--acc)"></span></div>` : ""}</div>`).join("")}
+      </aside>
+      <main style="padding:16px;overflow:auto">
+        ${s.newJob ? newJobForm() : ""}
+        <div style="display:flex;justify-content:space-between;align-items:end;margin-top:${s.newJob ? 16 : 0}px">
+          <div><h2>${esc(job.name)}</h2><div class="small mute">${job.id} · Taxonomy ${job.taxonomy} · ${job.question_sets.join(", ")} · profile ${job.profile} · escalate_below ${job.escalate_below}</div></div>
+          <div style="display:flex;gap:6px"><button onclick="toast('POST /v1/jobs/job_0007/cancel')">Cancel</button><button onclick="toast('GET /v1/jobs/job_0007/manifest')">Manifest</button><button onclick="toast('GET /v1/jobs/job_0007/export → partial JSONL')">Export JSONL</button></div>
+        </div>
+        <div class="panel" style="padding:12px;margin-top:10px">
+          <div style="display:flex;justify-content:space-between" class="small"><span><b>${live.done}</b> / ${live.total} Documents · ETA ${live.done < live.total ? job.eta : "done"}</span><span class="mute">${c.tokens.toLocaleString()} tokens · ≈$${(c.tokens / 1e6 * 0.042).toFixed(4)} Jev · ${c.ocr} docs OCR'd</span></div>
+          <div class="bar" style="margin-top:6px;height:12px"><span style="width:${(live.done - c.failed - c.flagged) / live.total * 100}%;background:var(--ok)"></span><span style="width:${c.flagged / live.total * 100}%;background:var(--warn)"></span><span style="width:${c.failed / live.total * 100}%;background:var(--bad)"></span></div>
+          <div class="small" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+            ${["all", "flagged", "failed", "ocr"].map(f => `<button data-f="${f}" class="${s.filter === f ? "primary" : ""}">${f === "all" ? `All ${R.length}` : f === "flagged" ? `Needs review ${c.flagged + c.escalated}` : f === "failed" ? `Failed ${c.failed}` : `OCR'd ${c.ocr}`}</button>`).join("")}
+            <select id="a-cat"><option value="">Category…</option>${M.sectors.map(x => `<option ${s.filter === x ? "selected" : ""}>${x}</option>`).join("")}</select>
+            <span class="mute" style="align-self:center">escalated ${c.escalated} · flagged-over-cap ${c.flagged} · failed ${c.failed}</span>
+          </div>
+        </div>
+        <table class="panel" style="margin-top:10px">
+          <tr><th>Document</th><th>Form</th><th>Sector</th><th>conf</th><th>going concern</th><th>outlook</th><th>status</th></tr>
+          ${rows.map(r => `<tr class="click" data-id="${r.id}" style="${s.sel === r.id ? "background:#eaf0ff" : ""}">
+            <td>${esc(r.company)}<div class="small mute">${esc(r.file.slice(0, 38))}</div></td><td>${r.form}</td>
+            <td>${r.classification?.category ?? "—"}</td><td>${pct(r.classification?.confidence)}</td>
+            <td>${r.answers ? pct(r.answers.going_concern.value) : "—"}</td><td>${r.answers?.outlook.value ?? "—"}</td>
+            <td>${statusPill(r)} ${escPill(r.escalation)}</td></tr>`).join("")}
+        </table>
+      </main>
+      ${s.sel ? `<aside style="border-left:1px solid var(--line);background:#fff;padding:14px;overflow:auto">
+        <div style="text-align:right"><button id="a-close">×</button></div>${recordDetail(R.find(r => r.id === s.sel))}</aside>` : ""}
+    </div>`;
+    el.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { s.filter = b.dataset.f; this.render(el); });
+    $("#a-cat", el).onchange = e => { s.filter = e.target.value || "all"; this.render(el); };
+    el.querySelectorAll("tr[data-id]").forEach(t => t.onclick = () => { s.sel = t.dataset.id; this.render(el); });
+    $("#a-close", el) && ($("#a-close", el).onclick = () => { s.sel = null; this.render(el); });
+    $("#a-new", el).onclick = () => { s.newJob = !s.newJob; this.render(el); };
+  },
+};
+
+/* ───────────── Variant B: Triage board (personal reading triage) ───────────── */
+const B = { name: "Triage board", api: ["POST /v1/documents:ingest (sync, one doc)", "GET /v1/jobs/{id}/records (grouped client-side)", "GET …/records?escalation.status=flagged", "(drag to correct → no endpoint yet)"],
+  state: { sel: null, ingesting: false, extra: [] },
+  render(el) {
+    const s = this.state;
+    const all = [...s.extra, ...R].filter(r => r.status === "done");
+    const review = all.filter(r => r.escalation.status === "flagged");
+    const byCat = {}; M.sectors.forEach(x => byCat[x] = []);
+    all.filter(r => r.escalation.status !== "flagged").forEach(r => byCat[r.classification.category].push(r));
+    const card = r => `<div class="panel card" draggable="true" data-id="${r.id}" style="padding:8px;margin-bottom:6px;cursor:grab;${r.escalation.status === "flagged" ? "border-color:#f3d39b;background:var(--warnbg)" : ""}${r._new ? ";outline:2px solid var(--acc)" : ""}">
+      <div style="display:flex;justify-content:space-between;gap:6px"><b class="small">${esc(r.company)}</b><span class="small mute">${pct(r.classification.confidence)}</span></div>
+      <div class="small mute">${r.form} · ${r.filed}</div>
+      <div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">${gcPill(r)}${r.answers.outlook.value != null ? `<span class="pill">outlook ${r.answers.outlook.value}</span>` : ""}${escPill(r.escalation)}${r.escalation.status === "flagged" ? `<span class="pill">${r.classification.category}?</span>` : ""}</div></div>`;
+    const col = (title, list, key, tone) => `<div class="col" data-cat="${key}" style="min-width:220px;max-width:220px;background:${tone || "#eef0f4"};border-radius:10px;padding:8px;max-height:calc(100vh - 170px);overflow:auto">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px"><b class="small">${title}</b><span class="small mute">${list.length}</span></div>${list.map(card).join("") || `<div class="small mute">—</div>`}</div>`;
+    el.innerHTML = `<div style="padding:16px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <b style="font-size:18px">acceleread</b>
+        <div style="flex:1;display:flex;gap:6px"><input id="b-url" style="flex:1;padding:10px" placeholder="Paste a URL or drop a PDF/HTML — classified in seconds (sync ingest)"><button class="primary" id="b-go">${s.ingesting ? "Classifying…" : "Classify now"}</button></div>
+        <select><option>Board: articles triage · week 40</option><option>corpus-60 · sector + filing risk</option></select>
+      </div>
+      <div class="small mute" style="margin:6px 0 12px">Columns = Taxonomy Categories. Drag a card to another column to correct it (stub). Click a card for the Record.</div>
+      <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:60px">
+        ${col("⚑ Needs review", review, "__review", "#fdf3df")}
+        ${M.sectors.filter(x => byCat[x].length).map(x => col(x, byCat[x], x)).join("")}
+      </div></div>
+      ${s.sel ? `<div style="position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:50" id="b-bg"><div class="panel" style="position:absolute;right:0;top:0;bottom:0;width:480px;padding:16px;overflow:auto;border-radius:0">${recordDetail([...s.extra, ...R].find(r => r.id === s.sel))}</div></div>` : ""}`;
+    el.querySelectorAll(".card").forEach(c => {
+      c.onclick = () => { s.sel = c.dataset.id; this.render(el); };
+      c.ondragstart = e => e.dataTransfer.setData("id", c.dataset.id);
+    });
+    el.querySelectorAll(".col").forEach(c => { c.ondragover = e => e.preventDefault(); c.ondrop = e => {
+      const r = [...s.extra, ...R].find(x => x.id === e.dataTransfer.getData("id")); if (!r || c.dataset.cat === "__review") return;
+      r.classification = { ...r.classification, category: c.dataset.cat }; r.escalation = { status: "none" };
+      toast(`STUB correction: ${r.company} → ${c.dataset.cat} (where does this go? Record? manifest? eval labels?)`); this.render(el); }; });
+    $("#b-bg", el) && ($("#b-bg", el).onclick = e => { if (e.target.id === "b-bg") { s.sel = null; this.render(el); } });
+    $("#b-go", el).onclick = () => {
+      const url = $("#b-url", el).value || "https://example.com/blog/why-margins-matter.html";
+      s.ingesting = true; this.render(el);
+      setTimeout(() => {
+        const r = JSON.parse(JSON.stringify(R[3])); r.id = "doc_new" + s.extra.length; r.company = url.replace(/^https?:\/\//, "").slice(0, 40); r._new = true; r.form = "HTML"; r.filed = "now";
+        s.extra.unshift(r); s.ingesting = false; toast("POST /v1/documents:ingest → 200 in 3.1 s (jumped the queue)"); this.render(el);
+      }, 900);
+    };
+  },
+};
+
+/* ───────────── Variant C: Guided flow + review queue ───────────── */
+const C = { name: "Guided flow + review", api: ["Step 1: POST /v1/jobs:validate (live, on every edit)", "Step 2: POST /v1/jobs → POST …/documents (repeat) → …/start", "Step 3: SSE /v1/jobs/{id}/events", "Step 4: GET …/records?escalation.status=flagged, one at a time"],
+  state: { step: 4, i: 0, decided: {} },
+  render(el) {
+    const s = this.state;
+    const steps = ["Define", "Add Documents", "Run", "Review"];
+    const queue = R.filter(r => r.escalation.status !== "none");
+    let body = "";
+    if (s.step === 1) body = `<div style="display:grid;grid-template-columns:1fr 340px;gap:14px">
+      <div class="panel" style="padding:12px"><h3>Question Set · filing-risk.yaml</h3>
+        <textarea style="width:100%;height:360px;font:12px ui-monospace,Menlo,monospace;margin-top:8px">name: filing-risk
+version: 3
+taxonomy:
+  name: sector
+  categories:
+    - {name: technology, description: Software, semiconductors, hardware}
+    - {name: financials, description: Banks, insurers, asset managers}
+    # … 10 more
+questions:
+  - name: going_concern
+    kind: noul
+    reads: [mdna, financial_statements]
+    instructions: The document expresses substantial doubt about the company's ability to continue as a going concern.
+  - name: outlook
+    kind: score
+    reads: [mdna]
+    instructions: Management's outlook for the business.   # ⚠ never mentions "document"
+    criteria: [Clearly negative, Cautious, Mixed, Positive, Strongly positive]
+    escalate_below: 0.6</textarea></div>
+      <div><div class="panel" style="padding:12px"><h3>Validate (live)</h3>
+        <div class="small" style="margin-top:8px">✓ 4 Questions, names unique<br>✓ <code>other</code> added to sector (13 options)<br>⚠ <code>outlook</code> instructions never mention <code>document</code><br>⚠ Taxonomy text is 22% of Jev's budget<br>ℹ 2 Jev requests per Document (reads groups: {mdna, financial_statements}, {mdna}) + Taxonomy joins whole-doc group<br>ℹ est. $0.0009 / Document</div></div>
+        <div class="panel" style="padding:12px;margin-top:10px"><h3>Try on one Document</h3><input placeholder="URL or file" style="width:100%;margin-top:6px"><button style="margin-top:6px" onclick="toast('POST /v1/documents:ingest with this spec')">Preview Record</button></div></div></div>`;
+    if (s.step === 2) body = `<div class="panel" style="padding:16px"><div style="border:2px dashed var(--line);padding:40px;border-radius:10px;text-align:center" class="mute">Drop files or a folder · paste URLs · (server paths if <code>allowed_roots</code> set)</div>
+      <table style="margin-top:12px"><tr><th>Document</th><th>external_id</th><th>user_metadata</th></tr>${R.slice(0, 8).map(r => `<tr><td>${esc(r.file)}</td><td><input value="${r.id}" style="width:110px"></td><td class="small mute">{"ticker": "…"}</td></tr>`).join("")}<tr><td class="mute">… 52 more</td><td></td><td></td></tr></table>
+      <div style="margin-top:10px;display:flex;justify-content:space-between"><span class="small mute">Profile <select><option>fast</option><option>quality</option></select> · LLM escalation <input type="checkbox"> (max 2%)</span><button class="primary" onclick="toast('POST /v1/jobs/{id}/start → queued #3')">Start Job</button></div></div>`;
+    if (s.step === 3) { const c = counts(); body = `<div class="panel" style="padding:16px;max-width:720px">
+      <h2>${live.done} / ${live.total}</h2><div class="bar" style="height:14px;margin:8px 0"><span style="width:${live.done / live.total * 100}%;background:var(--acc)"></span></div>
+      <div class="small mute">ETA ~4 min · ${c.tokens.toLocaleString()} tokens · flagged ${c.flagged} · escalated ${c.escalated}/1 cap · failed ${c.failed}</div>
+      <div style="font:12px ui-monospace,Menlo,monospace;background:#111;color:#cfd6e0;padding:10px;border-radius:8px;margin-top:12px;height:200px;overflow:auto">${R.slice(0, live.done).reverse().slice(0, 14).map(r => `${r.status === "failed" ? "✗" : r.escalation.status !== "none" ? "⚑" : "✓"} ${esc(r.company)} — ${r.classification?.category ?? r.error}`).join("<br>")}</div>
+      <div style="margin-top:10px;display:flex;gap:6px"><button onclick="toast('cancel')">Cancel</button><button onclick="toast('export partial JSONL')">Export so far</button><button class="primary" id="c-rev">Review ${c.flagged + c.escalated} flagged →</button></div></div>`; }
+    if (s.step === 4) {
+      const r = queue[s.i % queue.length];
+      body = `<div style="display:grid;grid-template-columns:1fr 480px;gap:14px;height:calc(100vh - 130px)">
+        <div class="panel" style="padding:14px;overflow:auto"><h3>What the Classifier read · ${esc(r.classification.coverage)}</h3>
+          <div style="font:13px Georgia,serif;margin-top:10px;line-height:1.6"><mark>[head] ${esc(r.company)} — FORM ${r.form}. ITEM 1. BUSINESS. The Company was incorporated in the State of Nevada… has not yet generated significant revenue… intends to …</mark>
+          <p class="mute">[… 61,200 characters not read …]</p><mark>[tail] …substantial doubt about the Company's ability to continue as a going concern… The Company's sole officer and director…</mark></div></div>
+        <div class="panel" style="padding:14px;overflow:auto">
+          <div class="small mute">Review ${s.i % queue.length + 1} of ${queue.length} · ${Object.keys(s.decided).length} decided</div>
+          ${recordDetail(r, { review: true })}
+          <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="primary" data-d="accept">Accept (A)</button>
+            <select id="c-ov"><option value="">Override…</option>${M.sectors.map(x => `<option>${x}</option>`).join("")}</select>
+            <button data-d="skip">Skip (S)</button><button onclick="toast('STUB: escalate this one to LLM past the cap?')">Escalate now</button></div>
+          ${s.decided[r.id] ? `<div class="small" style="margin-top:6px">Decided: <b>${s.decided[r.id]}</b> <span class="mute">(STUB — nowhere to store this yet)</span></div>` : ""}</div></div>`;
+    }
+    el.innerHTML = `<div style="padding:16px"><div style="display:flex;gap:6px;align-items:center;margin-bottom:14px"><b style="margin-right:12px">acceleread</b>
+      ${steps.map((x, i) => `<button data-step="${i + 1}" class="${s.step === i + 1 ? "primary" : ""}">${i + 1}. ${x}</button>`).join('<span class="mute">›</span>')}</div>${body}</div>`;
+    el.querySelectorAll("[data-step]").forEach(b => b.onclick = () => { s.step = +b.dataset.step; this.render(el); });
+    $("#c-rev", el) && ($("#c-rev", el).onclick = () => { s.step = 4; this.render(el); });
+    const decide = d => { const r = queue[s.i % queue.length]; s.decided[r.id] = d; s.i++; this.render(el); };
+    el.querySelectorAll("[data-d]").forEach(b => b.onclick = () => decide(b.dataset.d));
+    $("#c-ov", el) && ($("#c-ov", el).onchange = e => e.target.value && decide("override → " + e.target.value));
+    this._key = e => { if (s.step !== 4 || e.target.closest("input,textarea,select")) return; if (e.key === "a") decide("accept"); if (e.key === "s") decide("skip"); };
+  },
+};
+
+/* ───────────── switcher ───────────── */
+const V = { A, B, C }, keys = Object.keys(V);
+let cur = new URLSearchParams(location.search).get("variant"); if (!V[cur]) cur = "A";
+function show(k) {
+  cur = k; const u = new URL(location); u.searchParams.set("variant", k); history.replaceState(null, "", u);
+  V[k].render($("#app"));
+  $("#vlabel").textContent = `${k} (${V[k].name})`;
+  $("#apibox").innerHTML = `<b>Variant ${k} uses:</b><br>` + V[k].api.map(esc).join("<br>");
+}
+const step = d => show(keys[(keys.indexOf(cur) + d + keys.length) % keys.length]);
+$("#prev").onclick = () => step(-1); $("#next").onclick = () => step(1);
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input,textarea,select,[contenteditable]")) return;
+  if (e.key === "ArrowLeft") step(-1); else if (e.key === "ArrowRight") step(1); else V[cur]._key?.(e);
+});
+document.addEventListener("tick", () => { if (cur === "A" && !A.state.sel && !A.state.newJob) A.render($("#app")); if (cur === "C" && C.state.step === 3) C.render($("#app")); });
+show(cur);
+</script>
+</body>
+</html>
