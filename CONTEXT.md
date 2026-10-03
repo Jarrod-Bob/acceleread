@@ -5,11 +5,15 @@ Turns documents into structured, classified records quickly and cheaply, for peo
 ## Ingestion
 
 **Document**:
-One source file submitted for ingestion (a PDF in v0).
+One source file submitted for ingestion (a PDF or HTML file in v0).
 _Avoid_: File, article, item
 
 **Page**:
 A single page of a Document, the unit at which extraction method is decided.
+
+**Section**:
+A named, contiguous part of a Document (e.g. a filing's "Risk Factors"), used to choose what text a Classifier sees.
+_Avoid_: Chunk, part, segment
 
 **Extraction**:
 Turning a Document's Pages into text, either from the embedded text layer or by OCR.
@@ -40,6 +44,14 @@ _Avoid_: Model, engine
 **Classification**:
 A Classifier's verdict on one Document: the chosen Category plus the full probability distribution and confidence.
 _Avoid_: Prediction, label
+
+**Question**:
+A user-defined judgment asked of every Document in a Job beyond its Taxonomy, such as a yes/no condition or a graded score.
+_Avoid_: Check, metric, probe, signal
+
+**Answer**:
+A Classifier's response to one Question for one Document, with its probabilities.
+_Avoid_: Result, score
 
 **Escalation**:
 Handing a low-confidence Classification to a more expensive Classifier (e.g. an LLM) or a human.

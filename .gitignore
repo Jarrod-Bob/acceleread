@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+.claude/
+corpus/data/
+__pycache__/
+.venv/
