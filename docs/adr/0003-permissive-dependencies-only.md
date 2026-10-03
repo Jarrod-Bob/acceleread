@@ -5,5 +5,5 @@ acceleread depends only on permissively licensed code and model weights (MIT, BS
 ## Consequences
 
 - A new dependency's licence, and the licence of any model weights it downloads at runtime, must be checked before adoption. A weights licence can differ from the code's.
-- acceleread's own licence (MIT vs Apache-2.0) is still open, but no current dependency forces it.
+- acceleread itself is **Apache-2.0** (decided in [Is acceleread MIT or Apache-2.0?](https://github.com/Jarrod-Bob/acceleread/issues/20)). CI enforces this ADR with a licence allowlist over each extra's resolved environment, and model weights and vendored assets are listed by hand in `THIRD_PARTY_NOTICES.md`.
 - Details: [Which PDF extraction and OCR engine should v0 use?](https://github.com/Jarrod-Bob/acceleread/issues/2)
