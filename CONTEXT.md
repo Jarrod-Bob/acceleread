@@ -36,7 +36,7 @@ The part of a Document a single Classification or Answer actually read (which Se
 _Avoid_: Context, window, scope
 
 **Job**:
-A batch of Documents ingested together against one Taxonomy.
+A batch of Documents ingested together, judged against at most one Taxonomy and any number of Questions (at least one of either).
 _Avoid_: Run, batch, task
 
 ## Classification
@@ -58,8 +58,12 @@ A Classifier's verdict on one Document: the chosen Category plus the full probab
 _Avoid_: Prediction, label
 
 **Question**:
-A user-defined judgment asked of every Document in a Job beyond its Taxonomy, such as a yes/no condition or a graded score.
+A user-defined judgment asked of every Document in a Job beyond its Taxonomy: a yes/no condition, a graded score, or a choice among named options. It may name the Sections it reads.
 _Avoid_: Check, metric, probe, signal
+
+**Question Set**:
+A named, versioned collection of Questions (and optionally a Taxonomy) that Jobs reuse, such as a "filing risk" set.
+_Avoid_: Pack, template, preset
 
 **Answer**:
 A Classifier's response to one Question for one Document, with its probabilities.
