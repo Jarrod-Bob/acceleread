@@ -76,3 +76,7 @@ _Avoid_: Result, score
 **Escalation**:
 Handing a low-confidence Classification or Answer to a more expensive Classifier (e.g. an LLM) or flagging it for a human.
 _Avoid_: Fallback, retry
+
+**Review**:
+A person's verdict on one Judgment of one Document: accepted, or corrected to another value. Reviews are kept apart from Document Records, which never change, and serve as ground truth.
+_Avoid_: Correction, label, feedback
