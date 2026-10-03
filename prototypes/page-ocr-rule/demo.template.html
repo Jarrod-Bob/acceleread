@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page OCR Rule</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0;
+  --accent: #2f5fd0; --accent-soft: #e8eefb; --good: #1f7a4a; --good-soft: #e5f3ea;
+  --bad: #b3261e; --bad-soft: #fbe9e7; --warn: #8a5a00; --warn-soft: #fbf1dc;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618; --panel: #1f1f22; --ink: #ececee; --muted: #9a9aa2; --line: #333338;
+    --accent: #7ea2ff; --accent-soft: #232c45; --good: #6cc895; --good-soft: #1b2e23;
+    --bad: #ff8a80; --bad-soft: #3a1f1d; --warn: #f0c060; --warn-soft: #352a14;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 28px 16px 80px; }
+h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+p { margin: 0 0 10px; }
+.lede { color: var(--muted); max-width: 820px; }
+.tag { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--warn); background: var(--warn-soft); padding: 2px 8px; border-radius: 99px; margin-bottom: 10px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 18px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 18px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.rule { margin: 0; padding-left: 20px; }
+.rule li { margin-bottom: 8px; }
+.rule li.fired-any { }
+.setting { display: grid; grid-template-columns: 1fr 64px; gap: 4px 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.setting:first-of-type { border-top: 0; }
+.setting label { font-weight: 500; }
+.setting .help { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+.setting input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+.setting .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.setting.changed label::after { content: " • changed"; color: var(--accent); font-weight: 500; font-size: 12px; }
+.toggle { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+.toggle input { margin-top: 3px; accent-color: var(--accent); }
+.toggle .help { color: var(--muted); font-size: 12.5px; display: block; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 600px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.stat .n { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--muted); font-size: 12px; }
+.stat.bad .n { color: var(--bad); } .stat.good .n { color: var(--good); } .stat.warn .n { color: var(--warn); }
+.changes { margin-top: 12px; font-size: 13px; }
+.changes .none { color: var(--muted); }
+.changes li { margin-bottom: 4px; }
+button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px 12px; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+@media (prefers-color-scheme: dark) { button.primary { color: #10131c; } }
+button:disabled { opacity: 0.45; cursor: default; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.tabs button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.steps { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.step { display: flex; gap: 10px; align-items: center; }
+.step .num { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--line); color: var(--muted); flex: none; }
+.step.done .num { background: var(--good-soft); color: var(--good); }
+.step.next .num { background: var(--accent); color: #fff; }
+.step .note { color: var(--muted); font-size: 13px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; align-items: center; }
+.filters .count { color: var(--muted); margin-left: auto; font-size: 13px; }
+.pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); display: flex; flex-direction: column; }
+.card.wrong { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad) inset; }
+.card.flipped { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.card .top { display: flex; gap: 10px; padding: 10px; }
+.card img { width: 76px; height: 98px; object-fit: cover; object-position: top; border: 1px solid var(--line); border-radius: 4px; background: #fff; flex: none; }
+.card .name { font-weight: 600; font-size: 13px; line-height: 1.3; }
+.card .sub { color: var(--muted); font-size: 12px; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.badge { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; }
+.badge.ocr { background: var(--accent-soft); color: var(--accent); }
+.badge.keep { background: var(--line); color: var(--ink); }
+.badge.ok { background: var(--good-soft); color: var(--good); }
+.badge.miss, .badge.waste { background: var(--bad-soft); color: var(--bad); }
+.card .why { padding: 0 10px 8px; font-size: 12.5px; }
+.card .why b { font-weight: 600; }
+.sig { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); font-size: 11.5px; }
+.sig div { padding: 5px 8px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.sig div:nth-child(3n) { border-right: 0; }
+.sig span { display: block; color: var(--muted); font-size: 10.5px; }
+.sig .hot { color: var(--accent); font-weight: 600; }
+details.text { padding: 6px 10px 10px; font-size: 12px; }
+details.text summary { color: var(--muted); cursor: pointer; }
+details.text pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 140px; overflow: auto; background: var(--bg); padding: 6px; border-radius: 6px; }
+.findings li { margin-bottom: 6px; }
+code { font-size: 12.5px; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">Prototype — throwaway</span>
+  <h1>When should a Page go to OCR?</h1>
+  <p class="lede">
+    acceleread reads each PDF Page's embedded text first and only runs OCR (Tesseract in the <b>fast</b> Extraction
+    Profile, and as the gate on Docling's OCR in <b>quality</b>) when that text can't be trusted. This page lets you tune
+    that one shared rule against <b id="n-pages"></b> real Pages: three born-digital filings, two synthetic scans, and
+    14 hand-made awkward Pages. Every Page has an expected outcome; the score shows what the rule gets wrong.
+  </p>
+  <p class="lede">All signals were measured once by <code>extract_signals.py</code> (pypdfium2, no rendering), plus one cheap Jev
+    question per Page: <i>"Are most of the words in this text correctly spelled real words in some human language?"</i>
+    (total cost for every Page: <b id="jev-cost"></b>).</p>
+
+  <div class="grid2">
+    <section class="panel">
+      <h2>The rule, top to bottom</h2>
+      <ol class="rule" id="rule-text"></ol>
+      <div style="margin-top:14px" id="settings"></div>
+      <div style="margin-top:10px"><button id="reset">Reset to proposed defaults</button></div>
+    </section>
+
+    <section class="panel">
+      <h2>Score</h2>
+      <div class="stats" id="stats"></div>
+      <div class="changes" id="changes"></div>
+
+      <h2 style="margin-top:22px">Guided walkthroughs</h2>
+      <div class="tabs" id="scenario-tabs"></div>
+      <div id="scenario"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>Pages</h2>
+    <div class="filters" id="filters"></div>
+    <div class="pages" id="pages"></div>
+  </section>
+
+  <section class="panel">
+    <h2>What the measurements say</h2>
+    <ul class="findings">
+      <li><b>Character count alone can't be the rule.</b> 30 real born-digital Pages hold only a page number (1–2 characters) or a running header (~25); OCR'ing them is wasted. A scan with a typed stamp has 51 characters. The threshold has to sit in that gap and be paired with "is the Page mostly image?".</li>
+      <li><b>Dictionary-word ratio catches junk cheaply.</b> Born-digital English never fell below 0.78; garbled encoding scored 0.04 and a bad earlier OCR layer 0.44. But a perfect French Page scored 0.58. Below the cutoff, an English-only check would replace good French text with English-model OCR.</li>
+      <li><b>Jev rescues other languages but needs a floor.</b> Real words → 0.78–0.97, French 0.95, junk 0.22–0.35. On 1–2 character Pages it says ~0.3, so it only runs once a Page has enough text. Phrasing mattered: of three tried, "real, correctly spelled words" separated best. Scores moved ±0.1 between runs.</li>
+      <li><b>No cheap signal separates "chart beside text" from "scanned exhibit beside text".</b> Both have good text and ~40% image coverage. Telling them apart needs OCR on the image region (what Docling does in <b>quality</b>), or acceptance that fast mode misses it.</li>
+      <li><b>Image coverage must be the union of all images.</b> One scan stored as 10 strips has no single big image.</li>
+      <li><b>Text drawn as vector shapes</b> has no characters and no images, only paths. Born-digital near-empty Pages had ≤4 paths; the outlined Page had 48 (one per line).</li>
+    </ul>
+  </section>
+</main>
+
+<script id="signals" type="application/json">__SIGNALS__</script>
+
+<script>
+/* ---------- The rule: pure, no DOM. Lifts into acceleread's extraction module. ---------- */
+const OcrRule = (() => {
+  const DEFAULTS = {
+    minChars: 80,            // below this, the text layer is "almost empty"
+    scanCoverage: 0.6,       // almost empty + images cover this much of the Page → scan
+    outlinePaths: 20,        // almost empty + this many vector shapes → text drawn as outlines
+    maxBadChars: 0.05,       // share of control / private-use / replacement characters
+    minWordRatio: 0.7,       // share of letter-words found in an English dictionary
+    useJev: true,            // ask Jev before OCR'ing a Page that failed the dictionary check
+    jevKeep: 0.6,            // Jev "real words" probability at or above which the text is kept
+    ocrBesideImage: false,   // OCR a Page whose text is fine but a big image may hold more
+    besideImageCoverage: 0.3,
+    reocrInvisible: false,   // always redo Pages that carry an earlier OCR layer
+  };
+
+  /** Decide one Page. s = measured signals. Returns {action, step, reason}. */
+  function decidePage(s, cfg) {
+    if (s.chars < cfg.minChars) {
+      if (s.image_coverage >= cfg.scanCoverage)
+        return { action: "ocr", step: 1, reason: `Almost no text (${s.chars} chars) and images cover ${pct(s.image_coverage)} of the Page` };
+      if (s.path_count >= cfg.outlinePaths)
+        return { action: "ocr", step: 1, reason: `Almost no text but ${s.path_count} vector shapes: likely text drawn as outlines` };
+      return { action: "keep", step: 1, reason: `Almost no text (${s.chars} chars) and nothing that looks like hidden text: genuinely near-empty` };
+    }
+    if (cfg.reocrInvisible && s.invisible_text_ratio >= 0.5)
+      return { action: "ocr", step: 2, reason: `Text is invisible (an earlier OCR layer): redo it` };
+    if (s.bad_char_ratio >= cfg.maxBadChars)
+      return { action: "ocr", step: 3, reason: `${pct(s.bad_char_ratio)} of characters are control / unmapped codes: broken font encoding` };
+    if (s.word_ratio < cfg.minWordRatio) {
+      if (cfg.useJev && s.jev_usable != null && s.jev_usable >= cfg.jevKeep)
+        return { action: "keep", step: 4, reason: `Few English dictionary words (${pct(s.word_ratio)}) but Jev reads real words (${s.jev_usable.toFixed(2)})` };
+      return { action: "ocr", step: 4, reason: `Only ${pct(s.word_ratio)} dictionary words` + (cfg.useJev && s.jev_usable != null ? ` and Jev agrees it's junk (${s.jev_usable.toFixed(2)})` : ``) };
+    }
+    if (cfg.ocrBesideImage && s.image_coverage >= cfg.besideImageCoverage)
+      return { action: "ocr", step: 5, reason: `Text is fine but images cover ${pct(s.image_coverage)}: they may hold more text` };
+    return { action: "keep", step: 6, reason: `Text layer looks complete and readable` };
+  }
+
+  function outcome(page, decision) {
+    if (decision.action === page.expect) return "ok";
+    return page.expect === "ocr" ? "miss" : "waste";
+  }
+
+  function score(pages, cfg) {
+    const rows = pages.map(p => { const d = decidePage(p, cfg); return { page: p, decision: d, outcome: outcome(p, d) }; });
+    const count = k => rows.filter(r => r.outcome === k).length;
+    return {
+      rows,
+      ocr: rows.filter(r => r.decision.action === "ocr").length,
+      ok: count("ok"), miss: count("miss"), waste: count("waste"),
+      jevCalls: cfg.useJev ? rows.filter(r => r.page.chars >= cfg.minChars && r.page.bad_char_ratio < cfg.maxBadChars && r.page.word_ratio < cfg.minWordRatio).length : 0,
+    };
+  }
+
+  function pct(x) { return `${Math.round(x * 100)}%`; }
+  return { DEFAULTS, decidePage, score };
+})();
+
+/* ---------- Page shell: everything below is throwaway. ---------- */
+const PAGES = JSON.parse(document.getElementById("signals").textContent);
+const SETTINGS = [
+  { key: "minChars", label: "\"Almost no text\" below", min: 0, max: 300, step: 5, fmt: v => `${v} ch`, help: "Characters (excluding spaces) in the text layer." },
+  { key: "scanCoverage", label: "…and images cover at least", min: 0, max: 1, step: 0.05, fmt: v => `${Math.round(v * 100)}%`, help: "Union of every image on the Page." },
+  { key: "outlinePaths", label: "…or vector shapes at least", min: 1, max: 200, step: 1, fmt: v => v, help: "Text converted to outlines shows up as many shapes." },
+  { key: "maxBadChars", label: "Broken encoding at", min: 0.005, max: 0.3, step: 0.005, fmt: v => `${(v * 100).toFixed(1)}%`, help: "Share of control / private-use / replacement characters." },
+  { key: "minWordRatio", label: "Dictionary words needed", min: 0, max: 1, step: 0.02, fmt: v => `${Math.round(v * 100)}%`, help: "Share of letter-words found in an English word list." },
+  { key: "useJev", label: "Ask Jev before OCR'ing a Page with few dictionary words", toggle: true, help: "Saves Pages in other languages, names and tables. ~$0.00003 per question." },
+  { key: "jevKeep", label: "Keep if Jev says real words at least", min: 0, max: 1, step: 0.05, fmt: v => v.toFixed(2), help: "Jev's probability that most words are real, correctly spelled words." },
+  { key: "ocrBesideImage", label: "Also OCR Pages with good text beside a big image", toggle: true, help: "Catches a scanned exhibit next to typed text, but also OCRs every chart." },
+  { key: "besideImageCoverage", label: "…when images cover at least", min: 0.05, max: 1, step: 0.05, fmt: v => `${Math.round(v * 100)}%`, help: "" },
+  { key: "reocrInvisible", label: "Always redo Pages that already carry an earlier OCR layer", toggle: true, help: "Ignores how good that layer is." },
+];
+const RULE_TEXT = [
+  "<b>Almost no text?</b> OCR if the Page is mostly image, or full of vector shapes. Otherwise it really is near-empty: keep.",
+  "<b>Earlier OCR layer?</b> (optional) Redo it regardless.",
+  "<b>Broken encoding?</b> Many unmapped / control characters → OCR.",
+  "<b>Few dictionary words?</b> Ask Jev whether they're real words in any language. Real → keep; junk → OCR.",
+  "<b>Good text beside a big image?</b> (optional) OCR in case the image holds more.",
+  "Otherwise <b>keep the text layer</b>.",
+];
+const SCENARIOS = [
+  { title: "Proposed rule", text: "The defaults score every Page right except one: typed text with a scanned table underneath. Filter to the awkward Pages and read why each was decided.",
+    steps: [
+      { label: "Reset to proposed defaults", note: "", run: s => ({ ...OcrRule.DEFAULTS }) },
+      { label: "Show the awkward Pages", note: "", run: s => (state.filter = "tricky", s) },
+      { label: "Show only mistakes", note: "The one red card is the open question in the 'Chart or exhibit?' walkthrough.", run: s => (state.filter = "wrong", s) },
+    ] },
+  { title: "Other languages", text: "A perfect French Page has few English dictionary words. Without Jev, the rule sends it to an English OCR model and replaces good text with worse.",
+    steps: [
+      { label: "Reset to proposed defaults", run: s => (state.filter = "tricky", { ...OcrRule.DEFAULTS }) },
+      { label: "Turn off the Jev check", note: "Watch the French card turn red: wasted (and harmful) OCR.", run: s => ({ ...s, useJev: false }) },
+      { label: "Lower the dictionary bar to 50% instead", note: "French is kept, but the bad earlier OCR layer (44%) now nearly slips through.", run: s => ({ ...s, minWordRatio: 0.5 }) },
+      { label: "Turn Jev back on, bar back to 70%", note: "Both right again: Jev reads French as real words (0.95) and bad OCR as junk (0.22).", run: s => ({ ...s, useJev: true, minWordRatio: 0.7 }) },
+    ] },
+  { title: "Near-empty Pages", text: "Chrome-printed filings leave many Pages holding only a page number, which is fine. A scan with a typed stamp has 51 characters and is not fine.",
+    steps: [
+      { label: "Reset, show all Pages", run: s => (state.filter = "all", { ...OcrRule.DEFAULTS }) },
+      { label: "Drop \"almost no text\" to 0", note: "Page-number Pages fall through to the dictionary check and get OCR'd: lots of waste.", run: s => ({ ...s, minChars: 0 }) },
+      { label: "Set it to 40", note: "Waste gone, but the stamped scan (51 chars) now counts as having text → missed.", run: s => ({ ...s, minChars: 40 }) },
+      { label: "Set it to 80", note: "Both right. On these Pages any value from 55 to 275 works; above that, short real Pages with a lot of drawing start to look like scans or outlines.", run: s => ({ ...s, minChars: 80 }) },
+    ] },
+  { title: "Chart or exhibit?", text: "Typed text above a scanned table, versus typed text beside a chart. Same text quality, same ~40% image coverage. Cheap signals can't tell them apart.",
+    steps: [
+      { label: "Reset, show awkward Pages", run: s => (state.filter = "tricky", { ...OcrRule.DEFAULTS }) },
+      { label: "Turn on \"OCR good text beside a big image\"", note: "Exhibit caught, but three fine Pages are now wasted: the chart, the glossy full-bleed Page and the well-OCR'd scan. Annual reports are full of charts and photos.", run: s => ({ ...s, ocrBesideImage: true }) },
+      { label: "Raise its coverage bar to 44%", note: "Exhibit (41%) missed again, chart (43.5%) kept: a 2.5-point knife-edge, not a separation. Full-page images (glossy Page, well-OCR'd scan) are still wasted at any bar.", run: s => ({ ...s, besideImageCoverage: 0.44 }) },
+    ] },
+  { title: "Already OCR'd", text: "Some scans arrive with an invisible OCR layer from an earlier tool. Good ones should be trusted; bad ones redone.",
+    steps: [
+      { label: "Reset, show awkward Pages", run: s => (state.filter = "tricky", { ...OcrRule.DEFAULTS }) },
+      { label: "Turn on \"always redo earlier OCR\"", note: "The bad layer stays caught, but the good layer is now redone for nothing.", run: s => ({ ...s, reocrInvisible: true }) },
+      { label: "Turn it off again", note: "The dictionary check alone separates them (89% vs 44% words).", run: s => ({ ...s, reocrInvisible: false }) },
+    ] },
+  { title: "Text as shapes", text: "Designed reports sometimes convert fonts to outlines: no characters and no images, only many vector paths.",
+    steps: [
+      { label: "Reset, show awkward Pages", run: s => (state.filter = "tricky", { ...OcrRule.DEFAULTS }) },
+      { label: "Raise the vector-shape bar to 60", note: "The outlined Page (48 shapes) is now treated as empty → missed.", run: s => ({ ...s, outlinePaths: 60 }) },
+      { label: "Drop it to 3", note: "Page-number Pages (4 shapes: a rule line + border) now look like outlines → waste.", run: s => ({ ...s, outlinePaths: 3 }) },
+      { label: "Back to 20", run: s => ({ ...s, outlinePaths: 20 }) },
+    ] },
+];
+
+const state = { cfg: { ...OcrRule.DEFAULTS }, prev: null, filter: "tricky", scenario: 0, stepDone: 0 };
+
+function setCfg(next) {
+  state.prev = OcrRule.score(PAGES, state.cfg);
+  state.cfg = next;
+  render();
+}
+
+function renderSettings() {
+  const el = document.getElementById("settings");
+  el.innerHTML = "";
+  for (const s of SETTINGS) {
+    const v = state.cfg[s.key];
+    const changed = v !== OcrRule.DEFAULTS[s.key];
+    if (s.toggle) {
+      const row = document.createElement("label");
+      row.className = "toggle" + (changed ? " changed" : "");
+      row.innerHTML = `<input type="checkbox" ${v ? "checked" : ""}><span><b>${s.label}</b>${changed ? ' <span style="color:var(--accent);font-size:12px">• changed</span>' : ""}<span class="help">${s.help}</span></span>`;
+      row.querySelector("input").onchange = e => setCfg({ ...state.cfg, [s.key]: e.target.checked });
+      el.appendChild(row);
+    } else {
+      const row = document.createElement("div");
+      row.className = "setting" + (changed ? " changed" : "");
+      row.innerHTML = `<label>${s.label}</label><span class="val">${s.fmt(v)}</span><input type="range" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}">${s.help ? `<span class="help">${s.help}</span>` : ""}`;
+      const input = row.querySelector("input");
+      input.oninput = e => { row.querySelector(".val").textContent = s.fmt(+e.target.value); };
+      input.onchange = e => setCfg({ ...state.cfg, [s.key]: +e.target.value });
+      el.appendChild(row);
+    }
+  }
+}
+
+function renderStats(sc) {
+  const born = PAGES.filter(p => p.group === "born-digital").length;
+  document.getElementById("stats").innerHTML = [
+    ["Sent to OCR", sc.ocr, `of ${PAGES.length} Pages`, ""],
+    ["Right", sc.ok, `${Math.round(sc.ok / PAGES.length * 100)}%`, "good"],
+    ["Missed", sc.miss, "should OCR, kept", sc.miss ? "bad" : ""],
+    ["Wasted", sc.waste, "fine, OCR'd anyway", sc.waste ? "warn" : ""],
+  ].map(([l, n, sub, cls]) => `<div class="stat ${cls}"><div class="n">${n}</div><div class="l">${l} · ${sub}</div></div>`).join("") +
+  `<div class="stat" style="grid-column:1/-1"><div class="l">Jev questions asked under this rule: <b>${sc.jevCalls}</b> of ${PAGES.length} Pages · OCR at an assumed ~1.5 s/Page CPU (Tesseract): <b>${(sc.ocr * 1.5).toFixed(0)} s</b> for these Pages</div></div>`;
+
+  const ch = document.getElementById("changes");
+  if (!state.prev) { ch.innerHTML = `<span class="none">Change a setting to see which Pages flip.</span>`; return; }
+  const flipped = sc.rows.filter((r, i) => r.decision.action !== state.prev.rows[i].decision.action);
+  ch.innerHTML = flipped.length
+    ? `<b>Last change flipped ${flipped.length} Page${flipped.length > 1 ? "s" : ""}:</b><ul>` +
+      flipped.slice(0, 8).map(r => `<li>${label(r.page)} → <b>${r.decision.action === "ocr" ? "OCR" : "keep"}</b> ${r.outcome === "ok" ? "✓" : r.outcome === "miss" ? "(missed)" : "(wasted)"}</li>`).join("") +
+      (flipped.length > 8 ? `<li>…and ${flipped.length - 8} more (dashed outline below)</li>` : "") + `</ul>`
+    : `<span class="none">Last change flipped no Pages.</span>`;
+}
+
+function label(p) { return p.what || `${shortDoc(p.doc)} p.${p.page}`; }
+function shortDoc(d) { const m = d.match(/_([a-z]+)[-_]/i); return (m ? m[1].toUpperCase() : d) + (d.includes(".scan") ? " (scan)" : ""); }
+
+function renderScenario() {
+  document.getElementById("scenario-tabs").innerHTML = "";
+  SCENARIOS.forEach((sc, i) => {
+    const b = document.createElement("button");
+    b.textContent = sc.title;
+    if (i === state.scenario) b.className = "active";
+    b.onclick = () => { state.scenario = i; state.stepDone = 0; render(); };
+    document.getElementById("scenario-tabs").appendChild(b);
+  });
+  const sc = SCENARIOS[state.scenario];
+  const el = document.getElementById("scenario");
+  el.innerHTML = `<p>${sc.text}</p><div class="steps"></div>`;
+  sc.steps.forEach((st, i) => {
+    const row = document.createElement("div");
+    row.className = "step" + (i < state.stepDone ? " done" : i === state.stepDone ? " next" : "");
+    const btn = document.createElement("button");
+    btn.textContent = st.label;
+    if (i === state.stepDone) btn.className = "primary";
+    btn.disabled = i > state.stepDone;
+    btn.onclick = () => { state.stepDone = i + 1; setCfg(st.run({ ...state.cfg })); };
+    row.innerHTML = `<span class="num">${i < state.stepDone ? "✓" : i + 1}</span>`;
+    row.appendChild(btn);
+    if (st.note && i < state.stepDone) row.insertAdjacentHTML("beforeend", `<span class="note">${st.note}</span>`);
+    el.querySelector(".steps").appendChild(row);
+  });
+}
+
+function renderFilters(sc) {
+  const f = [["tricky", "Awkward Pages"], ["wrong", "Mistakes"], ["ocr", "Sent to OCR"], ["scan", "Scans"], ["born-digital", "Born-digital"], ["all", "All"]];
+  const el = document.getElementById("filters");
+  el.innerHTML = "";
+  for (const [k, l] of f) {
+    const b = document.createElement("button");
+    b.textContent = l;
+    if (state.filter === k) b.className = "active";
+    b.onclick = () => { state.filter = k; render(); };
+    el.appendChild(b);
+  }
+  el.classList.add("tabs");
+}
+
+function renderPages(sc) {
+  const flipped = new Set(state.prev ? sc.rows.filter((r, i) => r.decision.action !== state.prev.rows[i].decision.action).map(r => r.page.id) : []);
+  let rows = sc.rows;
+  const f = state.filter;
+  if (f === "wrong") rows = rows.filter(r => r.outcome !== "ok");
+  else if (f === "ocr") rows = rows.filter(r => r.decision.action === "ocr");
+  else if (f !== "all") rows = rows.filter(r => r.page.group === f);
+  rows = [...rows].sort((a, b) => (a.outcome === "ok") - (b.outcome === "ok") || flipped.has(b.page.id) - flipped.has(a.page.id));
+  document.getElementById("filters").insertAdjacentHTML("beforeend", `<span class="count">${rows.length} Pages</span>`);
+  const hot = (step, keys) => k => keys.includes(k) ? "hot" : "";
+  document.getElementById("pages").innerHTML = rows.map(({ page: p, decision: d, outcome: o }) => {
+    const h = hot(d.step, { 1: ["chars", "image_coverage", "path_count"], 2: ["invisible_text_ratio"], 3: ["bad_char_ratio"], 4: ["word_ratio", "jev_usable"], 5: ["image_coverage"] }[d.step] || []);
+    const sig = [
+      ["chars", "characters", p.chars],
+      ["word_ratio", "dictionary words", p.words ? `${Math.round(p.word_ratio * 100)}%` : "—"],
+      ["jev_usable", "Jev real words", p.jev_usable == null ? "—" : p.jev_usable.toFixed(2)],
+      ["image_coverage", "image coverage", `${Math.round(p.image_coverage * 100)}%`],
+      ["bad_char_ratio", "bad characters", `${(p.bad_char_ratio * 100).toFixed(1)}%`],
+      ["path_count", "vector shapes", p.path_count],
+      ["invisible_text_ratio", "invisible text", `${Math.round(p.invisible_text_ratio * 100)}%`],
+    ];
+    return `<div class="card ${o !== "ok" ? "wrong" : ""} ${flipped.has(p.id) ? "flipped" : ""}">
+      <div class="top"><img src="data:image/jpeg;base64,${p.thumb}" alt="">
+        <div><div class="name">${label(p)}</div>
+          <div class="sub">${shortDoc(p.doc)} · Page ${p.page} · expected: ${p.expect === "ocr" ? "OCR" : "keep"}</div>
+          <div class="badges"><span class="badge ${d.action}">${d.action === "ocr" ? "→ OCR" : "keep text"}</span>
+          <span class="badge ${o}">${o === "ok" ? "right" : o === "miss" ? "missed" : "wasted"}</span></div></div></div>
+      <div class="why"><b>Step ${d.step}:</b> ${d.reason}.${p.why ? `<div class="sub" style="margin-top:4px">${p.why}</div>` : ""}</div>
+      <div class="sig">${sig.map(([k, l, v]) => `<div class="${h(k)}"><span>${l}</span>${v}</div>`).join("")}<div></div><div></div></div>
+      <details class="text"><summary>Text layer (first 280 chars)</summary><pre>${esc(p.text_preview) || "(empty)"}</pre></details>
+    </div>`;
+  }).join("");
+}
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "�"); }
+
+function render() {
+  const sc = OcrRule.score(PAGES, state.cfg);
+  document.getElementById("rule-text").innerHTML = RULE_TEXT.map(t => `<li>${t}</li>`).join("");
+  renderSettings(); renderStats(sc); renderScenario(); renderFilters(sc); renderPages(sc);
+}
+
+document.getElementById("n-pages").textContent = PAGES.length;
+document.getElementById("jev-cost").textContent = "under one cent";
+document.getElementById("reset").onclick = () => setCfg({ ...OcrRule.DEFAULTS });
+render();
+</script>
+</body>
+</html>
