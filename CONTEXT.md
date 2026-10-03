@@ -19,6 +19,14 @@ _Avoid_: Chunk, part, segment
 Turning a Document's Pages into text, either from the embedded text layer or by OCR.
 _Avoid_: Parsing, reading
 
+**Extraction Profile**:
+The chosen way of turning a Job's PDF Pages into text, either `fast` or `quality`; HTML is unaffected.
+_Avoid_: Mode, engine, pipeline
+
+**Section Verification**:
+A cheap Classifier judgment that confirms or rejects a detected Section before Questions rely on it.
+_Avoid_: Validation, QA, check
+
 **Document Record**:
 The structured output of ingesting one Document: its extracted text, page metadata, and Classification.
 _Avoid_: Result, output, doc
