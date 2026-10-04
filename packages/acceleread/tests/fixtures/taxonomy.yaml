@@ -1,0 +1,8 @@
+name: sector
+categories:
+  - name: energy
+    description: Oil and gas, renewable power generation and equipment such as solar panels
+  - name: financials
+    description: Banks, insurers, asset managers
+  - name: technology
+    description: Software, semiconductors, computer hardware

@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.9",
     "pypdfium2>=4.30",
     "python-multipart>=0.0.18",
+    "pyyaml>=6.0",
     "tesserocr>=2.11",
     "typesafe-sdk[http2]>=0.7.2",
     "uvicorn[standard]>=0.32",
