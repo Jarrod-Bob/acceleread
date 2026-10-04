@@ -2,7 +2,7 @@
 """The rate limiter around a Classifier (docs/spec/v0.md §7.5), on a fake clock."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import pytest
 
@@ -20,7 +20,6 @@ from acceleread.classifier import (
 )
 from acceleread.models import ClassifierInfo
 from acceleread.ratelimit import (
-    JEV_RATE_LIMIT,
     RateLimit,
     RateLimitedClassifier,
     priority_lane,
@@ -59,6 +58,8 @@ class ScriptedClassifier:
         self.in_flight = 0
         self.max_in_flight = 0
         self.gate: asyncio.Event | None = None
+        self.on_call: Callable[[], None] | None = None
+        self.saturated = asyncio.Event()  # set once 64 requests are in flight
 
     @property
     def capabilities(self) -> Capabilities:
@@ -68,6 +69,10 @@ class ScriptedClassifier:
         self.calls.append(state)
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        if self.in_flight >= 64:
+            self.saturated.set()
+        if self.on_call is not None:
+            self.on_call()
         try:
             if self.gate is not None:
                 await self.gate.wait()
@@ -87,12 +92,6 @@ def limited(
 ) -> tuple[RateLimitedClassifier, FakeClock]:
     clock = clock or FakeClock()
     return RateLimitedClassifier(inner, ceiling, clock=clock), clock
-
-
-def test_jev_ceiling_is_80_percent_of_published_limits() -> None:
-    assert JEV_RATE_LIMIT.tokens_per_s == pytest.approx(64_000)
-    assert JEV_RATE_LIMIT.requests_per_s == pytest.approx(51.2)
-    assert JEV_RATE_LIMIT.max_in_flight == 64
 
 
 async def test_passes_results_and_capabilities_through() -> None:
@@ -134,7 +133,8 @@ async def test_at_most_64_requests_in_flight() -> None:
     inner.gate = asyncio.Event()
     limiter, _ = limited(inner)
     tasks = [asyncio.create_task(limiter.judge({}, ASK)) for _ in range(70)]
-    for _ in range(5):
+    await asyncio.wait_for(inner.saturated.wait(), timeout=5)
+    for _ in range(20):  # give a 65th request every chance to start
         await asyncio.sleep(0)
     assert inner.max_in_flight == 64
     inner.gate.set()
@@ -217,6 +217,16 @@ async def test_stalled_after_15_minutes_without_success_while_work_waits() -> No
     assert limiter.stalled
     inner.gate.set()
     await task
+    assert not limiter.stalled
+
+
+async def test_a_lone_retrying_request_still_stalls() -> None:
+    inner = ScriptedClassifier([ClassifierThrottled(retry_after=60)] * 20)
+    limiter, _ = limited(inner)
+    stalled_seen: list[bool] = []
+    inner.on_call = lambda: stalled_seen.append(limiter.stalled)
+    await limiter.judge({}, ASK)
+    assert not stalled_seen[0] and any(stalled_seen)
     assert not limiter.stalled
 
 

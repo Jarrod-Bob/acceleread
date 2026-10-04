@@ -59,10 +59,6 @@ def ceiling_for(published: RateLimit) -> RateLimit:
     )
 
 
-JEV_PUBLISHED_LIMIT = RateLimit(tokens_per_s=80_000, requests_per_s=64)
-JEV_RATE_LIMIT = ceiling_for(JEV_PUBLISHED_LIMIT)
-
-
 class Clock(Protocol):
     def now(self) -> float: ...
 
@@ -119,7 +115,7 @@ class RateLimitedClassifier:
     def __init__(
         self,
         inner: Classifier,
-        ceiling: RateLimit = JEV_RATE_LIMIT,
+        ceiling: RateLimit,
         *,
         clock: Clock | None = None,
         max_unavailable_tries: int = MAX_UNAVAILABLE_TRIES,
@@ -137,6 +133,7 @@ class RateLimitedClassifier:
         self._requests = max(1.0, ceiling.requests_per_s)
         self._refilled_at = now
         self._in_flight = 0
+        self._active = 0  # judge() calls underway, including ones sleeping between retries
         self._waiting: set[tuple[int, int]] = set()
         self._sequence = itertools.count()
         self._parked: list[asyncio.Future[None]] = []
@@ -159,8 +156,7 @@ class RateLimitedClassifier:
     @property
     def stalled(self) -> bool:
         """True after 15 minutes without a success while requests are waiting or in flight."""
-        busy = self._in_flight > 0 or bool(self._waiting)
-        return busy and self._clock.now() - self._progress_at >= STALL_AFTER
+        return self._active > 0 and self._clock.now() - self._progress_at >= STALL_AFTER
 
     def _current(self) -> RateLimit:
         c = self._ceiling
@@ -182,6 +178,11 @@ class RateLimitedClassifier:
         )
         self._refilled_at = now
 
+    def _credit(self, tokens: float) -> None:
+        """Add (or, if negative, charge) tokens, up to one second's burst."""
+        self._advance()
+        self._tokens = min(self._current().tokens_per_s, self._tokens + tokens)
+
     def _wake_all(self) -> None:
         parked, self._parked = self._parked, []
         for future in parked:
@@ -196,8 +197,6 @@ class RateLimitedClassifier:
     async def _admit(self, cost: float, priority: bool) -> None:
         """Wait for this request's turn: priority first, then arrival order."""
         key = (0 if priority else 1, next(self._sequence))
-        if self._in_flight == 0 and not self._waiting:
-            self._progress_at = self._clock.now()
         self._waiting.add(key)
         try:
             while True:
@@ -235,51 +234,60 @@ class RateLimitedClassifier:
             self._factor = max(MIN_FACTOR, self._factor * DECREASE_FACTOR)
             self._last_event = now
             self._epoch += 1
-            rate = self._current()
-            self._tokens = min(self._tokens, rate.tokens_per_s)
+            self._credit(0)  # clamp the bucket to the lowered rate
         delay = error.retry_after if error.retry_after is not None else _backoff(attempt)
         self._blocked_until = max(self._blocked_until, now + delay)
-
-    def _refund(self, cost: float) -> None:
-        self._advance()
-        self._tokens = min(self._current().tokens_per_s, self._tokens + cost)
 
     def _reconcile(self, estimated: float, actual: int | None) -> None:
         self._progress_at = self._clock.now()
         if actual is not None:
-            self._advance()
-            self._tokens = min(self._current().tokens_per_s, self._tokens + estimated - actual)
+            self._credit(estimated - actual)
 
     async def judge(self, state: JSONState, judgments: Mapping[str, Ask]) -> ClassifierResponse:
+        if self._active == 0:  # genuinely new work, not a retry
+            self._progress_at = self._clock.now()
+        self._active += 1
+        try:
+            return await self._judge_with_retries(state, judgments)
+        finally:
+            self._active -= 1
+
+    async def _send(
+        self, state: JSONState, judgments: Mapping[str, Ask], cost: float
+    ) -> ClassifierResponse:
+        """One attempt. A failed attempt is not charged; a success is reconciled with usage."""
+        self._in_flight += 1
+        try:
+            response = await self._inner.judge(state, judgments)
+        except BaseException:
+            self._credit(cost)
+            raise
+        else:
+            self._reconcile(cost, response.input_tokens)
+            return response
+        finally:
+            self._in_flight -= 1
+            self._wake_all()
+
+    async def _judge_with_retries(
+        self, state: JSONState, judgments: Mapping[str, Ask]
+    ) -> ClassifierResponse:
         priority = _priority.get()
         cost = estimate_tokens(state, judgments, self.capabilities.chars_per_token)
         throttles = transients = unavailable = 0
         while True:
             await self._admit(cost, priority)
             epoch = self._epoch
-            self._in_flight += 1
             try:
-                response = await self._inner.judge(state, judgments)
+                return await self._send(state, judgments, cost)
             except ClassifierThrottled as error:
-                self._refund(cost)
                 self._throttled(epoch, error, throttles)
                 throttles += 1
             except ClassifierTransient:
-                self._refund(cost)
                 await self._clock.sleep(_backoff(transients))
                 transients += 1
             except ClassifierUnavailable:
-                self._refund(cost)
                 unavailable += 1
                 if unavailable >= self._max_unavailable_tries:
                     raise
                 await self._clock.sleep(_backoff(unavailable - 1))
-            except BaseException:
-                self._refund(cost)
-                raise
-            else:
-                self._reconcile(cost, response.input_tokens)
-                return response
-            finally:
-                self._in_flight -= 1
-                self._wake_all()

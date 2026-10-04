@@ -3,7 +3,7 @@
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import httpx2
 import pytest
@@ -18,9 +18,18 @@ from acceleread.classifier import (
     Noul,
     Score,
 )
-from acceleread.jev import JevClassifier, configure_sdk_logging
+from acceleread.jev import JEV_RATE_LIMIT, JevClassifier, configure_sdk_logging
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
+
+
+@pytest.fixture
+def sdk_logger() -> Iterator[logging.Logger]:
+    """The SDK logger, with its level restored afterwards."""
+    logger = logging.getLogger("typesafe_sdk")
+    saved = logger.level
+    yield logger
+    logger.setLevel(saved)
 
 
 def jev(handler: Handler) -> JevClassifier:
@@ -40,6 +49,12 @@ def answering(answers: dict[str, object], seen: list[dict[str, object]] | None =
         return httpx2.Response(200, json=body)
 
     return handler
+
+
+def test_jev_ceiling_is_80_percent_of_published_limits() -> None:
+    assert JEV_RATE_LIMIT.tokens_per_s == pytest.approx(64_000)
+    assert JEV_RATE_LIMIT.requests_per_s == pytest.approx(51.2)
+    assert JEV_RATE_LIMIT.max_in_flight == 64
 
 
 def test_capabilities_declare_jev_limits() -> None:
@@ -147,27 +162,99 @@ async def test_other_4xx_propagates_unchanged() -> None:
     assert isinstance(await failing(400), ts.TypeSafeBadRequestError)
 
 
-def test_sdk_debug_payload_logging_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    sdk_logger = logging.getLogger("typesafe_sdk")
+def test_sdk_debug_payload_logging_is_off_by_default(
+    monkeypatch: pytest.MonkeyPatch, sdk_logger: logging.Logger
+) -> None:
     monkeypatch.delenv("ACCELEREAD_DEBUG_PAYLOADS", raising=False)
     sdk_logger.setLevel(logging.DEBUG)  # as TYPESAFE_LOG_LEVEL=debug would
     configure_sdk_logging()
     assert not sdk_logger.isEnabledFor(logging.DEBUG)
 
 
-def test_sdk_debug_payload_logging_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    sdk_logger = logging.getLogger("typesafe_sdk")
+def test_sdk_debug_payload_logging_opt_in_is_loud(
+    monkeypatch: pytest.MonkeyPatch, sdk_logger: logging.Logger, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("ACCELEREAD_DEBUG_PAYLOADS", "1")
     sdk_logger.setLevel(logging.DEBUG)
-    configure_sdk_logging()
+    with caplog.at_level(logging.WARNING, logger="acceleread.jev"):
+        configure_sdk_logging()
     assert sdk_logger.isEnabledFor(logging.DEBUG)
+    (warning,) = [r for r in caplog.records if r.name == "acceleread.jev"]
+    assert warning.levelno == logging.WARNING
+    assert "ACCELEREAD_DEBUG_PAYLOADS" in warning.getMessage()
 
 
 def test_constructing_the_classifier_applies_the_logging_policy(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, sdk_logger: logging.Logger
 ) -> None:
-    sdk_logger = logging.getLogger("typesafe_sdk")
     monkeypatch.delenv("ACCELEREAD_DEBUG_PAYLOADS", raising=False)
     sdk_logger.setLevel(logging.DEBUG)
     JevClassifier()
     assert not sdk_logger.isEnabledFor(logging.DEBUG)
+
+
+SECRET = "SECRET-DOCUMENT-TEXT"
+
+
+async def test_seam_errors_never_carry_request_or_server_text() -> None:
+    def echo(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(422, json={"error": {"message": f"bad {SECRET}"}})
+
+    with pytest.raises(ClassifierRejected) as rejected:
+        await jev(echo).judge({"text": SECRET}, {"q": Noul(SECRET)})
+    assert SECRET not in str(rejected.value) and "422" in str(rejected.value)
+
+    def broken(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError(f"cannot send {SECRET}", request=request)
+
+    with pytest.raises(ClassifierTransient) as transient:
+        await jev(broken).judge({"text": SECRET}, {"q": Noul("?")})
+    assert SECRET not in str(transient.value)
+
+
+async def test_timeout_is_transient() -> None:
+    def slow(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("slow", request=request)
+
+    with pytest.raises(ClassifierTransient):
+        await jev(slow).judge({}, {"q": Noul("?")})
+
+
+async def test_529_carries_retry_after_end_to_end() -> None:
+    error = await failing(529, {"retry-after": "2.5"})
+    assert isinstance(error, ClassifierThrottled) and error.retry_after == 2.5
+
+
+async def test_sdk_never_retries_underneath_the_limiter() -> None:
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        return httpx2.Response(500, json={})
+
+    # An injected client with the SDK's default retry policy (2 retries).
+    client = ts.AsyncTypeSafeClient(api_key="k", transport=httpx2.MockTransport(handler))
+    with pytest.raises(ClassifierUnavailable):
+        await JevClassifier(client=client).judge({}, {"q": Noul("?")})
+    assert calls == 1
+
+
+async def test_lazily_created_client_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        return httpx2.Response(500, json={})
+
+    real = ts.AsyncTypeSafeClient
+
+    def factory(**kwargs: object) -> ts.AsyncTypeSafeClient:
+        # Default retry policy, so the adapter must be the one switching retries off.
+        return real(api_key="k", transport=httpx2.MockTransport(handler))
+
+    monkeypatch.setattr("acceleread.jev.ts.AsyncTypeSafeClient", factory)
+    with pytest.raises(ClassifierUnavailable):
+        await JevClassifier().judge({}, {"q": Noul("?")})
+    assert calls == 1
