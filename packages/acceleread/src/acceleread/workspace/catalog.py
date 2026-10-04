@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from acceleread.workspace import _db
+
 JobState = Literal["queued", "running", "done", "failed", "cancelled"]
 JobKind = Literal["job", "ingest"]
 FINISHED_STATES = ("done", "failed", "cancelled")
@@ -42,6 +44,10 @@ class JobInfo(BaseModel):
     pruned: bool
 
 
+class JobPrunedError(RuntimeError):
+    """The Job was pruned: it can be exported but not resumed or retried."""
+
+
 class JobRunningError(RuntimeError):
     """The Job is running, so it cannot be deleted or pruned."""
 
@@ -50,10 +56,7 @@ class Catalog:
     def __init__(self, db: sqlite3.Connection, clock: Callable[[], float]) -> None:
         self._db = db
         self._clock = clock
-        if int(db.execute("PRAGMA user_version").fetchone()[0]) < CATALOG_VERSION:
-            db.executescript(
-                f"BEGIN;\n{_SCHEMA}\nPRAGMA user_version = {CATALOG_VERSION};\nCOMMIT;"
-            )
+        _db.migrate(db, [(CATALOG_VERSION, _SCHEMA)])
 
     # Jobs
 
@@ -93,11 +96,25 @@ class Catalog:
     def close(self) -> None:
         self._db.close()
 
-    def mark_pruned(self, job_id: str) -> None:
-        self._db.execute("UPDATE jobs SET pruned=1 WHERE id=?", (job_id,))
+    def mark_pruned(self, job_id: str) -> bool:
+        """Mark the Job pruned. False if it already was."""
+        cursor = self._db.execute("UPDATE jobs SET pruned=1 WHERE id=? AND pruned=0", (job_id,))
+        return cursor.rowcount == 1
 
-    def remove(self, job_id: str) -> None:
-        self._db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    def remove(self, job_id: str, *, before: Callable[[], None]) -> None:
+        """Remove a Job's row, atomically with the not-running check.
+
+        `before` runs inside the transaction and should delete the Job's files; if it raises,
+        the row stays.
+        """
+        with _db.transaction(self._db):
+            row = self._db.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row[0] == "running":
+                raise JobRunningError(f"Job {job_id} is running")
+            before()
+            self._db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
     def _select(self, where: str, params: tuple[str, ...]) -> list[JobInfo]:
         rows = self._db.execute(
@@ -117,8 +134,7 @@ class Catalog:
     def acquire_lease(self, holder: str, ttl: float = DEFAULT_LEASE_TTL) -> bool:
         """Take the lease if it is free, stale or already ours. Only the holder writes."""
         now = self._clock()
-        self._db.execute("BEGIN IMMEDIATE")
-        try:
+        with _db.transaction(self._db):
             row = self._db.execute("SELECT holder, heartbeat_at, ttl FROM lease").fetchone()
             free = row is None or row[0] == holder or now - row[1] > row[2]
             if free:
@@ -128,16 +144,14 @@ class Catalog:
                     " heartbeat_at=excluded.heartbeat_at, ttl=excluded.ttl",
                     (holder, now, ttl),
                 )
-        except BaseException:
-            self._db.execute("ROLLBACK")
-            raise
-        self._db.execute("COMMIT")
         return free
 
     def heartbeat(self, holder: str) -> bool:
-        """Refresh the lease. False means it was lost to another holder."""
+        """Refresh a live lease. False means it was lost or went stale: re-acquire it."""
+        now = self._clock()
         cursor = self._db.execute(
-            "UPDATE lease SET heartbeat_at=? WHERE holder=?", (self._clock(), holder)
+            "UPDATE lease SET heartbeat_at=? WHERE holder=? AND ? - heartbeat_at <= ttl",
+            (now, holder, now),
         )
         return cursor.rowcount == 1
 

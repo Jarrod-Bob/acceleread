@@ -11,6 +11,8 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+from acceleread.workspace import _db
+
 CACHE_FORMAT_VERSION = 1
 
 
@@ -18,13 +20,14 @@ class JudgmentCache:
     def __init__(self, db: sqlite3.Connection, clock: Callable[[], float]) -> None:
         self._db = db
         self._clock = clock
-        if int(db.execute("PRAGMA user_version").fetchone()[0]) != CACHE_FORMAT_VERSION:
-            db.executescript(
-                "BEGIN; DROP TABLE IF EXISTS judgments;"
-                " CREATE TABLE judgments (key TEXT PRIMARY KEY, value TEXT NOT NULL,"
-                " last_used REAL NOT NULL);"
-                f" PRAGMA user_version = {CACHE_FORMAT_VERSION}; COMMIT;"
-            )
+        with _db.transaction(db):
+            if int(db.execute("PRAGMA user_version").fetchone()[0]) != CACHE_FORMAT_VERSION:
+                db.execute("DROP TABLE IF EXISTS judgments")
+                db.execute(
+                    "CREATE TABLE judgments (key TEXT PRIMARY KEY, value TEXT NOT NULL,"
+                    " last_used REAL NOT NULL)"
+                )
+                db.execute(f"PRAGMA user_version = {CACHE_FORMAT_VERSION}")
 
     def get(self, key: str) -> dict[str, Any] | None:
         row = self._db.execute("SELECT value FROM judgments WHERE key=?", (key,)).fetchone()

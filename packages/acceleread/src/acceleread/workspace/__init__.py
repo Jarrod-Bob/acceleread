@@ -4,6 +4,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-from acceleread.workspace import _db, jobstore
+from acceleread.workspace import _db
 from acceleread.workspace._fs import detect_filesystem_type, is_network_fs
 from acceleread.workspace.cache import JudgmentCache
 from acceleread.workspace.catalog import (
@@ -21,24 +22,28 @@ from acceleread.workspace.catalog import (
     Catalog,
     JobInfo,
     JobKind,
+    JobPrunedError,
     JobRunningError,
     JobState,
 )
 from acceleread.workspace.inputs import InputChangedError, InputRef, JobInputs
-from acceleread.workspace.jobstore import JobStore, StorageVersionError
+from acceleread.workspace.jobstore import DocumentState, JobStore, StorageVersionError
 
 __all__ = [
+    "DocumentState",
     "InputChangedError",
     "InputRef",
     "JobInfo",
     "JobInputs",
+    "JobKind",
+    "JobPrunedError",
     "JobRunningError",
+    "JobState",
     "JobStore",
     "JudgmentCache",
     "NetworkFilesystemError",
     "StorageVersionError",
     "Workspace",
-    "jobstore",
     "resolve_workspace_path",
 ]
 
@@ -60,8 +65,16 @@ class Workspace:
     def __init__(self, path: Path, *, clock: Callable[[], float] = time.time) -> None:
         self.path = path
         self.jobs_dir = path / "jobs"
-        self._catalog = Catalog(_db.connect(path / "catalog.sqlite"), clock)
-        self.cache = JudgmentCache(_db.connect(path / "cache.sqlite"), clock)
+        opened: list[sqlite3.Connection] = []
+        try:
+            opened.append(_db.connect(path / "catalog.sqlite"))
+            self._catalog = Catalog(opened[0], clock)
+            opened.append(_db.connect(path / "cache.sqlite"))
+            self.cache = JudgmentCache(opened[1], clock)
+        except BaseException:
+            for db in opened:
+                db.close()
+            raise
 
     @classmethod
     def open(
@@ -108,7 +121,7 @@ class Workspace:
 
     def create_job(self, manifest: dict[str, Any], *, kind: JobKind = "job") -> JobInfo:
         """Create a queued Job: its directory, `job.sqlite`, `manifest.json` and `inputs/`."""
-        job_id = f"{int(time.time()):x}-{uuid.uuid4().hex[:10]}"
+        job_id = f"{int(self._catalog.now()):x}-{uuid.uuid4().hex[:10]}"
         directory = self.job_dir(job_id)
         (directory / "inputs").mkdir(parents=True)
         JobStore.create(directory, job_id=job_id).close()
@@ -146,7 +159,7 @@ class Workspace:
     def open_job(self, job_id: str) -> JobStore:
         """The Job's store for running, resuming or retrying. Refused once pruned."""
         if self._catalog.get(job_id).pruned:
-            raise PermissionError(f"Job {job_id} was pruned: it can be exported but not retried")
+            raise JobPrunedError(f"Job {job_id} was pruned: it can be exported but not retried")
         return JobStore.open_for_run(self.job_dir(job_id))
 
     def read_job(self, job_id: str) -> JobStore:
@@ -171,11 +184,18 @@ class Workspace:
     # Retention
 
     def delete_job(self, job_id: str) -> None:
-        """Remove the Job's directory and catalog entry. Refused while it runs."""
-        if self._catalog.get(job_id).state == "running":
-            raise JobRunningError(f"Job {job_id} is running")
-        shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
-        self._catalog.remove(job_id)
+        """Remove the Job's directory and catalog entry. Refused while it runs.
+
+        The running check, the file removal and the row removal share one transaction; the row
+        goes only once the directory has.
+        """
+        directory = self.job_dir(job_id)
+
+        def remove_files() -> None:
+            if directory.exists():
+                shutil.rmtree(directory)
+
+        self._catalog.remove(job_id, before=remove_files)
 
     def prune_jobs(
         self,
@@ -186,8 +206,9 @@ class Workspace:
     ) -> list[str]:
         """Free disk from finished Jobs older than `older_than`; returns the Job ids pruned.
 
-        By default the whole Job goes. With `keep_records`, only `inputs/` is removed: the Job
-        stays listable and exportable but can no longer be retried.
+        Pruning removes `inputs/` and, unless `keep_records`, the Records' text, then leaves
+        the Job exportable but no longer retryable. The Job is marked pruned first, so a crash
+        part-way never leaves an unmarked Job without inputs.
         """
         cutoff = self._catalog.now() - older_than.total_seconds()
         pruned: list[str] = []
@@ -196,12 +217,14 @@ class Workspace:
                 continue
             if job.finished_at > cutoff or (kind is not None and job.kind != kind):
                 continue
-            if keep_records:
-                if job.pruned:
-                    continue
-                shutil.rmtree(self.job_dir(job.id) / "inputs", ignore_errors=True)
-                self._catalog.mark_pruned(job.id)
-            else:
-                self.delete_job(job.id)
-            pruned.append(job.id)
+            changed = self._catalog.mark_pruned(job.id)
+            directory = self.job_dir(job.id)
+            if (directory / "inputs").exists():
+                shutil.rmtree(directory / "inputs")
+                changed = True
+            if not keep_records:
+                with JobStore.open_for_maintenance(directory) as store:
+                    changed = store.drop_text() > 0 or changed
+            if changed:
+                pruned.append(job.id)
         return pruned

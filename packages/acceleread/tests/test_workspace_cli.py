@@ -52,7 +52,7 @@ def test_delete_of_unknown_job_fails(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "nope" in capsys.readouterr().err
 
 
-def test_jobs_prune_reports_what_it_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+def test_jobs_prune_reports_what_it_pruned(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     with Workspace.open(tmp_path, clock=lambda: 1.0) as ws:
         job = ws.create_job({}, kind="ingest")
         ws.finish_job(job.id, "done")
@@ -61,7 +61,9 @@ def test_jobs_prune_reports_what_it_removed(tmp_path: Path, capsys: pytest.Captu
     )
     assert code == 0
     assert job.id in capsys.readouterr().out
-    assert not (tmp_path / "jobs" / job.id).exists()
+    assert (tmp_path / "jobs" / job.id / "job.sqlite").exists()  # pruned, not deleted
+    with Workspace.open(tmp_path) as ws:
+        assert ws.get_job(job.id).pruned
 
 
 def test_jobs_prune_keep_records(tmp_path: Path):

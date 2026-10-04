@@ -34,16 +34,27 @@ class JobInputs:
         self.directory = directory
 
     def add_bytes(self, data: bytes) -> InputRef:
-        """Copy an upload or fetched URL body into `inputs/`, named by its SHA-256."""
+        """Copy an upload or fetched URL body into `inputs/`, named by its SHA-256.
+
+        The stored path is relative to the Job directory, so a moved Workspace keeps working.
+        """
         sha = hashlib.sha256(data).hexdigest()
         target = self.directory / sha
         if not target.exists():
             self.directory.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=".tmp-")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-            os.replace(tmp, target)  # atomic: a crash never leaves a half-written input
-        return InputRef(kind="copy", path=str(target), sha256=sha, bytes=len(data))
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, target)  # atomic: a crash never leaves a half-written input
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        return InputRef(
+            kind="copy", path=f"{self.directory.name}/{sha}", sha256=sha, bytes=len(data)
+        )
 
     def reference_path(self, path: Path) -> InputRef:
         """Record a local file's size and hash without copying it."""
@@ -56,6 +67,8 @@ class JobInputs:
 
     def open(self, ref: InputRef) -> BinaryIO:
         """Open the input, failing if a referenced local file is missing or has changed."""
+        if ref.kind == "copy":
+            return (self.directory.parent / ref.path).open("rb")
         path = Path(ref.path)
         if ref.kind == "path":
             if not path.is_file():

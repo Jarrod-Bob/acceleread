@@ -2,14 +2,16 @@
 """Catalog (Jobs, FIFO, runner lease), Job directories, inputs, retention (spec §8, §7.2)."""
 
 import json
-import os
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from acceleread.models import DocumentRecord, Source
 from acceleread.workspace import (
     InputChangedError,
+    InputRef,
+    JobPrunedError,
     JobRunningError,
     Workspace,
 )
@@ -115,6 +117,14 @@ def test_stale_lease_is_taken_over(ws: Workspace, clock: Clock):
     assert ws.lease_holder() == "b"
 
 
+def test_heartbeat_cannot_revive_an_expired_lease(ws: Workspace, clock: Clock):
+    ws.acquire_lease("a", ttl=30)
+    clock.advance(seconds=31)
+    assert not ws.heartbeat("a")
+    assert ws.lease_holder() is None
+    assert ws.acquire_lease("a", ttl=30)  # the holder has to re-acquire
+
+
 def test_release_frees_the_lease(ws: Workspace):
     ws.acquire_lease("a")
     ws.release_lease("a")
@@ -141,9 +151,9 @@ def test_uploads_are_copied_by_content_hash(ws: Workspace):
     ref = ws.job_inputs(job.id).add_bytes(b"%PDF-hello")
     assert ref.kind == "copy"
     assert ref.bytes == 10
-    assert Path(ref.path).parent == ws.job_dir(job.id) / "inputs"
-    assert Path(ref.path).name == ref.sha256
-    assert Path(ref.path).read_bytes() == b"%PDF-hello"
+    assert ref.path == f"inputs/{ref.sha256}"  # relative to the Job directory
+    assert (ws.job_dir(job.id) / ref.path).read_bytes() == b"%PDF-hello"
+    assert ws.job_inputs(job.id).open(ref).read() == b"%PDF-hello"
 
 
 def test_identical_uploads_are_stored_once(ws: Workspace):
@@ -151,7 +161,7 @@ def test_identical_uploads_are_stored_once(ws: Workspace):
     a = inputs.add_bytes(b"same")
     b = inputs.add_bytes(b"same")
     assert a == b
-    assert len(list(Path(a.path).parent.iterdir())) == 1
+    assert len(list(inputs.directory.iterdir())) == 1
 
 
 def test_local_paths_are_referenced_not_copied(ws: Workspace, tmp_path: Path):
@@ -219,7 +229,27 @@ def _age(ws: Workspace, clock: Clock, job_id: str, days: int) -> None:
     clock.advance(days=days)
 
 
-def test_prune_removes_only_finished_jobs_older_than_cutoff(ws: Workspace, clock: Clock):
+def _record(doc: str, text: str | None = "some filing text") -> DocumentRecord:
+    return DocumentRecord(
+        record_id=f"rec-{doc}",
+        job_id="j",
+        status="ok",
+        source=Source(filename=f"{doc}.pdf", format="pdf", sha256="ab" * 32, bytes=3),
+        text=text,
+    )
+
+
+def _job_with_input_and_record(ws: Workspace) -> tuple[str, InputRef]:
+    job = ws.create_job({})
+    ref = ws.job_inputs(job.id).add_bytes(b"big upload")
+    with ws.open_job(job.id) as store:
+        store.add_documents(["d1"])
+        store.set_input_ref("d1", ref)
+        store.save_record("d1", "done", _record("d1"))
+    return job.id, ref
+
+
+def test_prune_marks_old_finished_jobs_and_leaves_others_alone(ws: Workspace, clock: Clock):
     old = ws.create_job({})
     _age(ws, clock, old.id, 10)
     recent = ws.create_job({})
@@ -227,9 +257,26 @@ def test_prune_removes_only_finished_jobs_older_than_cutoff(ws: Workspace, clock
     running = ws.create_job({})
     ws.set_job_state(running.id, "running")
     queued = ws.create_job({})
-    removed = ws.prune_jobs(older_than=timedelta(days=5))
-    assert removed == [old.id]
-    assert {j.id for j in ws.list_jobs()} == {recent.id, running.id, queued.id}
+    assert ws.prune_jobs(older_than=timedelta(days=5)) == [old.id]
+    assert {j.id for j in ws.list_jobs() if j.pruned} == {old.id}
+    assert {j.id for j in ws.list_jobs()} == {old.id, recent.id, running.id, queued.id}
+
+
+def test_prune_frees_inputs_and_record_text_but_keeps_the_job_exportable(
+    ws: Workspace, clock: Clock
+):
+    job_id, ref = _job_with_input_and_record(ws)
+    _age(ws, clock, job_id, 10)
+    assert ws.prune_jobs(older_than=timedelta(days=5)) == [job_id]
+    assert not (ws.job_dir(job_id) / ref.path).exists()
+    assert ws.get_job(job_id).pruned
+    with ws.read_job(job_id) as reader:  # still exportable, without text
+        record = reader.get_record("d1")
+        assert record is not None
+        assert record.text is None
+        assert record.status == "ok"
+    with pytest.raises(JobPrunedError, match="pruned"):
+        ws.open_job(job_id)  # but not retryable
 
 
 def test_prune_can_target_ingest_jobs_only(ws: Workspace, clock: Clock):
@@ -238,27 +285,142 @@ def test_prune_can_target_ingest_jobs_only(ws: Workspace, clock: Clock):
     _age(ws, clock, job.id, 0)
     _age(ws, clock, ingest.id, 10)
     assert ws.prune_jobs(older_than=timedelta(days=1), kind="ingest") == [ingest.id]
+    assert [j.id for j in ws.list_jobs() if j.pruned] == []
+    assert ws.get_job(ingest.id).pruned
+
+
+def test_prune_keep_records_frees_inputs_only(ws: Workspace, clock: Clock):
+    job_id, ref = _job_with_input_and_record(ws)
+    _age(ws, clock, job_id, 10)
+    assert ws.prune_jobs(older_than=timedelta(days=5), keep_records=True) == [job_id]
+    assert not (ws.job_dir(job_id) / ref.path).exists()
+    assert ws.get_job(job_id).pruned
+    with ws.read_job(job_id) as reader:
+        record = reader.get_record("d1")
+        assert record is not None
+        assert record.text == "some filing text"
+    with pytest.raises(JobPrunedError):
+        ws.open_job(job_id)
+
+
+def test_prune_marks_the_job_before_removing_anything(
+    ws: Workspace, clock: Clock, monkeypatch: pytest.MonkeyPatch
+):
+    job_id, _ref = _job_with_input_and_record(ws)
+    _age(ws, clock, job_id, 10)
+
+    def crash(*_a: object, **_k: object) -> None:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr("acceleread.workspace.shutil.rmtree", crash)
+    with pytest.raises(OSError, match="disk"):
+        ws.prune_jobs(older_than=timedelta(days=5))
+    assert ws.get_job(job_id).pruned
+
+
+def test_pruning_twice_reports_nothing_new(ws: Workspace, clock: Clock):
+    job_id, _ref = _job_with_input_and_record(ws)
+    _age(ws, clock, job_id, 10)
+    ws.prune_jobs(older_than=timedelta(days=5))
+    assert ws.prune_jobs(older_than=timedelta(days=5)) == []
+
+
+def test_delete_failure_keeps_the_catalog_row(ws: Workspace, monkeypatch: pytest.MonkeyPatch):
+    job = ws.create_job({})
+    ws.finish_job(job.id, "done")
+
+    def crash(*_a: object, **_k: object) -> None:
+        raise OSError("busy")
+
+    monkeypatch.setattr("acceleread.workspace.shutil.rmtree", crash)
+    with pytest.raises(OSError, match="busy"):
+        ws.delete_job(job.id)
     assert [j.id for j in ws.list_jobs()] == [job.id]
 
 
-def test_prune_keep_records_frees_inputs_but_keeps_the_job(ws: Workspace, clock: Clock):
+def test_missing_job_database_is_an_error_not_an_empty_store(ws: Workspace):
     job = ws.create_job({})
-    ref = ws.job_inputs(job.id).add_bytes(b"big upload")
-    _age(ws, clock, job.id, 10)
-    assert ws.prune_jobs(older_than=timedelta(days=5), keep_records=True) == [job.id]
-    assert not Path(ref.path).exists()
-    assert ws.get_job(job.id).pruned
-    with ws.read_job(job.id):  # still exportable
-        pass
-    with pytest.raises(PermissionError, match="pruned"):
-        ws.open_job(job.id)  # but not retryable
+    (ws.job_dir(job.id) / "job.sqlite").unlink()
+    for name in ("job.sqlite-wal", "job.sqlite-shm"):
+        (ws.job_dir(job.id) / name).unlink(missing_ok=True)
+    with pytest.raises(FileNotFoundError):
+        ws.read_job(job.id)
+    with pytest.raises(FileNotFoundError):
+        ws.open_job(job.id)
+    assert not (ws.job_dir(job.id) / "job.sqlite").exists()
 
 
-def test_prune_leaves_no_stray_files(ws: Workspace, clock: Clock):
-    job = ws.create_job({})
-    _age(ws, clock, job.id, 10)
-    ws.prune_jobs(older_than=timedelta(days=5))
-    assert os.listdir(ws.path / "jobs") == []
+def test_job_ids_come_from_the_injected_clock(ws: Workspace, clock: Clock):
+    assert ws.create_job({}).id.startswith(f"{int(clock.now):x}-")
+
+
+def test_inputs_survive_moving_the_workspace(tmp_path: Path):
+    with Workspace.open(tmp_path / "old") as ws:
+        job = ws.create_job({})
+        ref = ws.job_inputs(job.id).add_bytes(b"portable")
+    (tmp_path / "old").rename(tmp_path / "new")
+    with Workspace.open(tmp_path / "new") as moved:
+        assert moved.job_inputs(job.id).open(ref).read() == b"portable"
+
+
+def test_failed_copy_leaves_no_temp_file(ws: Workspace, monkeypatch: pytest.MonkeyPatch):
+    inputs = ws.job_inputs(ws.create_job({}).id)
+
+    def crash(*_a: object, **_k: object) -> None:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr("acceleread.workspace.inputs.os.replace", crash)
+    with pytest.raises(OSError, match="rename"):
+        inputs.add_bytes(b"data")
+    assert list(inputs.directory.iterdir()) == []
+
+
+def test_pruned_job_error_is_a_domain_error():
+    assert not issubclass(JobPrunedError, PermissionError)
+
+
+def test_opening_a_fresh_workspace_concurrently_is_safe(tmp_path: Path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(6)
+
+    def open_it(_: int) -> int:
+        barrier.wait()
+        with Workspace.open(tmp_path / "ws") as w:
+            w.cache.put("k", {})
+            return len(w.list_jobs())
+
+    with ThreadPoolExecutor(6) as pool:
+        assert list(pool.map(open_it, range(6))) == [0] * 6
+
+
+def test_failed_cache_open_does_not_leak_the_catalog_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import sqlite3
+
+    from acceleread.workspace import _db
+
+    opened: list[sqlite3.Connection] = []
+    real = _db.connect
+
+    def tracking(path: Path) -> sqlite3.Connection:
+        db = real(path)
+        opened.append(db)
+        return db
+
+    def broken(*_a: object, **_k: object) -> None:
+        raise RuntimeError("cache broken")
+
+    monkeypatch.setattr("acceleread.workspace._db.connect", tracking)
+    monkeypatch.setattr("acceleread.workspace.JudgmentCache", broken)
+    with pytest.raises(RuntimeError, match="cache broken"):
+        Workspace.open(tmp_path)
+    assert opened
+    for db in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            db.execute("SELECT 1")
 
 
 # Judgment cache

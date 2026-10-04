@@ -8,8 +8,7 @@ JSON, with indexed columns for the filters the UI and API use.
 
 import sqlite3
 import zlib
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Self
@@ -65,17 +64,14 @@ def _major(version: int) -> int:
     return version // 1000
 
 
-def _migrate(db: sqlite3.Connection) -> None:
-    current = int(db.execute("PRAGMA user_version").fetchone()[0])
-    for version, sql in MIGRATIONS:
-        if version > current:
-            body = sql.strip().rstrip(";")
-            db.executescript(f"BEGIN;\n{body};\nPRAGMA user_version = {version};\nCOMMIT;")
-
-
 def _stored_version(path: Path) -> int:
-    with sqlite3.connect(path) as raw:
+    if not path.is_file():
+        raise FileNotFoundError(f"no job database at {path}")
+    raw = _db.connect_readonly(path)
+    try:
         return int(raw.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        raw.close()
 
 
 def _index_columns(record: dict[str, Any]) -> dict[str, Any]:
@@ -98,12 +94,33 @@ class JobStore:
     def create(cls, job_dir: Path, *, job_id: str) -> Self:
         job_dir.mkdir(parents=True, exist_ok=True)
         db = _db.connect(job_dir / "job.sqlite")
-        _migrate(db)
-        db.execute("INSERT OR IGNORE INTO meta VALUES ('job_id', ?)", (job_id,))
-        db.execute(
-            "INSERT OR IGNORE INTO meta VALUES ('created_major', ?)",
-            (str(_major(STORAGE_VERSION)),),
-        )
+
+        def record_origin(conn: sqlite3.Connection) -> None:
+            conn.execute("INSERT OR IGNORE INTO meta VALUES ('job_id', ?)", (job_id,))
+            conn.execute(
+                "INSERT OR IGNORE INTO meta VALUES ('created_major', ?)",
+                (str(_major(STORAGE_VERSION)),),
+            )
+
+        try:
+            _db.migrate(db, MIGRATIONS, on_apply=record_origin)
+        except BaseException:
+            db.close()
+            raise
+        return cls(db, job_dir)
+
+    @classmethod
+    def _open_writer(cls, job_dir: Path) -> Self:
+        """A migrated read-write connection, with no major-version check (maintenance)."""
+        path = job_dir / "job.sqlite"
+        if _major(_stored_version(path)) > _major(STORAGE_VERSION):
+            raise StorageVersionError(f"{job_dir.name} was written by a newer major version")
+        db = _db.connect(path)
+        try:
+            _db.migrate(db, MIGRATIONS)
+        except BaseException:
+            db.close()
+            raise
         return cls(db, job_dir)
 
     @classmethod
@@ -114,15 +131,18 @@ class JobStore:
         if _major(stored) > _major(STORAGE_VERSION):
             raise StorageVersionError(f"{job_dir.name} was written by a newer major version")
         db = _db.connect(path)
-        row = db.execute("SELECT value FROM meta WHERE key='created_major'").fetchone()
-        if row is None or int(row[0]) != _major(STORAGE_VERSION):
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key='created_major'").fetchone()
+            if row is None or int(row[0]) != _major(STORAGE_VERSION):
+                raise StorageVersionError(
+                    f"{job_dir.name} was created under storage major version "
+                    f"{row and row[0]}; resume and retry are refused across a major version "
+                    f"(current: {_major(STORAGE_VERSION)}). It can still be read and exported."
+                )
+            _db.migrate(db, MIGRATIONS)
+        except BaseException:
             db.close()
-            raise StorageVersionError(
-                f"{job_dir.name} was created under storage major version {row and row[0]}; "
-                f"resume and retry are refused across a major version "
-                f"(current: {_major(STORAGE_VERSION)}). It can still be read and exported."
-            )
-        _migrate(db)
+            raise
         return cls(db, job_dir)
 
     @classmethod
@@ -135,12 +155,13 @@ class JobStore:
                 f"{job_dir.name} was written by a newer version of acceleread (storage {stored})"
             )
         if stored < STORAGE_VERSION:
-            migrator = _db.connect(path)
-            try:
-                _migrate(migrator)
-            finally:
-                migrator.close()
+            cls._open_writer(job_dir).close()
         return cls(_db.connect_readonly(path), job_dir)
+
+    @classmethod
+    def open_for_maintenance(cls, job_dir: Path) -> Self:
+        """A read-write handle for pruning, allowed on any Job this version can read."""
+        return cls._open_writer(job_dir)
 
     def close(self) -> None:
         self._db.close()
@@ -156,15 +177,15 @@ class JobStore:
     ) -> None:
         self.close()
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        self._db.execute("BEGIN IMMEDIATE")
-        try:
-            yield self._db
-        except BaseException:
-            self._db.execute("ROLLBACK")
-            raise
-        self._db.execute("COMMIT")
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return _db.transaction(self._db)
+
+    def drop_text(self) -> int:
+        """Null every Record's text (prune). Returns how many Documents held text."""
+        with self._transaction() as db:
+            return db.execute(
+                "UPDATE documents SET text=NULL, has_text=0 WHERE has_text=1"
+            ).rowcount
 
     def add_documents(self, doc_ids: list[str]) -> None:
         with self._transaction() as db:
