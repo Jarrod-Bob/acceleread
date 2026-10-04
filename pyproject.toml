@@ -11,7 +11,9 @@ acceleread-eval = { workspace = true }
 dev = [
     "mypy>=1.13",
     "pytest>=8.3",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.8",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -31,6 +33,11 @@ python_version = "3.12"
 strict = true
 files = ["packages/acceleread/src", "packages/acceleread-eval/src", "tools"]
 
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pypdfium2.*"]  # ships no type information
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["packages/acceleread/tests", "packages/acceleread-eval/tests"]
 addopts = "--import-mode=importlib"
+asyncio_mode = "auto"

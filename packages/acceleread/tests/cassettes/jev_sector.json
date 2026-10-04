@@ -1,0 +1,52 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "path": "/v1/systemone",
+      "json": {
+        "state": {
+          "document": {
+            "title": "Northwind Solar Annual Report",
+            "text": "NORTHWIND SOLAR, INC. - ANNUAL REPORT\nItem 1. Business\nNorthwind Solar designs and manufactures photovoltaic panels and inverters\nfor residential and commercial rooftops. We sell through installers in\ntwelve states and operate two factories in Arizona.\n\nItem 7. Management's Discussion and Analysis\nRevenue grew 18% to $412 million on higher panel shipments.\nGross margin improved as polysilicon prices declined.\nWe expect continued growth from utility-scale contracts next year."
+          }
+        },
+        "model": "jev-1.13.0",
+        "questions": {
+          "taxonomy": {
+            "type": "choice",
+            "instructions": "Which category best describes `document`?",
+            "criteria": {
+              "energy": "Oil and gas, renewable power generation and equipment such as solar panels",
+              "financials": "Banks, insurers, asset managers",
+              "technology": "Software, semiconductors, computer hardware",
+              "other": "None of the other categories fits."
+            }
+          }
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "taxonomy": {
+            "type": "choice",
+            "choice": "energy",
+            "confidence": 1.0,
+            "probabilities": {
+              "technology": 0.0,
+              "other": 0.0,
+              "financials": 0.0,
+              "energy": 1.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 506,
+          "output_tokens": 47
+        }
+      }
+    }
+  }
+]
