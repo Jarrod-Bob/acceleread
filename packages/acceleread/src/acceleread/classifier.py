@@ -65,3 +65,27 @@ class Classifier(Protocol):
     def capabilities(self) -> Capabilities: ...
 
     async def judge(self, state: JSONState, judgments: Mapping[str, Ask]) -> ClassifierResponse: ...
+
+
+class ClassifierError(Exception):
+    """Base of the failures a Classifier reports to the rate limiter (docs/spec/v0.md §7.5)."""
+
+
+class ClassifierThrottled(ClassifierError):
+    """The Classifier asked us to slow down (429 or 529). Never fails a Document."""
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        super().__init__("classifier throttled")
+        self.retry_after = retry_after  # seconds
+
+
+class ClassifierTransient(ClassifierError):
+    """A timeout or connection error. Never fails a Document; the request is re-queued."""
+
+
+class ClassifierUnavailable(ClassifierError):
+    """A server-side failure (5xx). Persistent ones fail the Document."""
+
+
+class ClassifierRejected(ClassifierError):
+    """The Classifier refused the request as invalid (422). The Job auto-cancels."""
