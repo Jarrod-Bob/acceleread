@@ -2,15 +2,34 @@
 """SQLite connection helpers shared by the Workspace databases (spec §8)."""
 
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 
+def _enable_wal(db: sqlite3.Connection, timeout: float = 30.0) -> None:
+    """Switch to WAL. Changing a fresh database's mode takes an exclusive lock that SQLite can
+    refuse with SQLITE_BUSY without honouring the busy timeout, so retry until a deadline."""
+    deadline = time.monotonic() + timeout
+    delay = 0.005
+    while True:
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err) and "busy" not in str(err):
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
 def connect(path: Path) -> sqlite3.Connection:
     """Open a read-write connection in WAL mode. Transactions are explicit (BEGIN/COMMIT)."""
     db = sqlite3.connect(path, isolation_level=None, timeout=30)
-    db.execute("PRAGMA journal_mode=WAL")
+    _enable_wal(db)
     db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA foreign_keys=ON")
     return db
