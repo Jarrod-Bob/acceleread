@@ -3,7 +3,9 @@
 
 import argparse
 import asyncio
+import re
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import TextIO
 
@@ -12,6 +14,11 @@ from acceleread.classifier import Classifier
 from acceleread.jev import JevClassifier
 from acceleread.models import DEFAULT_JEV_MODEL, JobSpec, Taxonomy
 from acceleread.pipeline import run
+from acceleread.workspace import (
+    JobRunningError,
+    NetworkFilesystemError,
+    Workspace,
+)
 
 
 def make_classifier(model: str) -> Classifier:
@@ -28,10 +35,87 @@ async def _run(spec: JobSpec, out: TextIO) -> int:
     return 1 if failed else 0
 
 
+_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def parse_duration(text: str) -> timedelta:
+    """Parse `90s`, `15m`, `12h`, `30d` or `2w`."""
+    match = re.fullmatch(r"(\d+)([smhdw])", text.strip())
+    if match is None:
+        raise ValueError(f"invalid duration {text!r}: use a number and s, m, h, d or w")
+    return timedelta(**{_UNITS[match[2]]: int(match[1])})
+
+
+def _duration_arg(text: str) -> timedelta:
+    try:
+        return parse_duration(text)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err)) from err
+
+
+def _housekeeping(args: argparse.Namespace) -> int:
+    """`jobs delete`, `jobs prune`, `cache prune` and `cache clear`."""
+    try:
+        workspace = Workspace.open(args.workspace, allow_network_fs=args.allow_network_fs)
+    except NetworkFilesystemError as err:
+        print(f"acceleread: {err}", file=sys.stderr)
+        return 1
+    with workspace:
+        if args.command == "cache":
+            if args.cache_command == "clear":
+                print(f"cleared {workspace.cache.clear()} cached Judgments")
+            else:
+                print(
+                    f"pruned {workspace.cache.prune(older_than=args.older_than)} cached Judgments"
+                )
+            return 0
+        try:
+            if args.jobs_command == "delete":
+                workspace.delete_job(args.job_id)
+                print(f"deleted {args.job_id}")
+            else:
+                for job_id in workspace.prune_jobs(
+                    older_than=args.older_than, keep_records=args.keep_records, kind=args.kind
+                ):
+                    print(f"pruned {job_id}")
+        except JobRunningError as err:
+            print(f"acceleread: {err}", file=sys.stderr)
+            return 1
+        except KeyError as err:
+            print(f"acceleread: no such Job: {err.args[0]}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="acceleread")
     parser.add_argument("--version", action="version", version=f"acceleread {__version__}")
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="Workspace directory (default: $ACCELEREAD_HOME or ~/.acceleread)",
+    )
+    parser.add_argument(
+        "--allow-network-fs",
+        action="store_true",
+        help="allow a Workspace on NFS or SMB, where SQLite WAL is unsafe",
+    )
     commands = parser.add_subparsers(dest="command")
+
+    jobs_cmd = commands.add_parser("jobs", help="manage Jobs in the Workspace")
+    jobs = jobs_cmd.add_subparsers(dest="jobs_command", required=True)
+    delete_cmd = jobs.add_parser("delete", help="delete a Job's directory (refused while running)")
+    delete_cmd.add_argument("job_id")
+    prune_cmd = jobs.add_parser("prune", help="free disk from finished Jobs")
+    prune_cmd.add_argument("--older-than", type=_duration_arg, required=True, metavar="DURATION")
+    prune_cmd.add_argument("--keep-records", action="store_true", help="remove only inputs")
+    prune_cmd.add_argument("--kind", choices=["job", "ingest"], help="only Jobs of this kind")
+
+    cache_cmd = commands.add_parser("cache", help="manage the Judgment cache")
+    cache = cache_cmd.add_subparsers(dest="cache_command", required=True)
+    cache_prune = cache.add_parser("prune", help="drop Judgments not used recently")
+    cache_prune.add_argument("--older-than", type=_duration_arg, required=True, metavar="DURATION")
+    cache.add_parser("clear", help="drop every cached Judgment")
 
     run_cmd = commands.add_parser("run", help="ingest Documents and print Records as JSONL")
     run_cmd.add_argument("inputs", nargs="+", type=Path, help="PDF files")
@@ -40,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("-o", "--output", type=Path, help="write JSONL here instead of stdout")
 
     args = parser.parse_args(argv)
+    if args.command in ("jobs", "cache"):
+        return _housekeeping(args)
     if args.command != "run":
         parser.print_help()
         return 0
