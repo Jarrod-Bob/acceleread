@@ -14,6 +14,7 @@ from acceleread.classifier import Classifier
 from acceleread.jev import JevClassifier
 from acceleread.models import DEFAULT_JEV_MODEL, JobSpec, Taxonomy
 from acceleread.pipeline import run
+from acceleread.workers import WorkerSettings
 from acceleread.workspace import (
     JobRunningError,
     NetworkFilesystemError,
@@ -25,9 +26,9 @@ def make_classifier(model: str) -> Classifier:
     return JevClassifier(model=model)
 
 
-async def _run(spec: JobSpec, out: TextIO) -> int:
+async def _run(spec: JobSpec, out: TextIO, workers: WorkerSettings) -> int:
     failed = 0
-    async for record in run(spec, make_classifier(spec.model)):
+    async for record in run(spec, make_classifier(spec.model), workers):
         out.write(record.model_dump_json(exclude_none=True) + "\n")
         out.flush()
         failed += record.status != "ok"
@@ -123,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--model", default=DEFAULT_JEV_MODEL, help="Jev model")
     run_cmd.add_argument("-o", "--output", type=Path, help="write JSONL here instead of stdout")
 
+    run_cmd.add_argument("--ocr-workers", type=int, help="extraction workers (default: by Profile)")
+    run_cmd.add_argument("--threads-per-worker", type=int, help="threads per extraction worker")
+
     args = parser.parse_args(argv)
     if args.command in ("jobs", "cache"):
         return _housekeeping(args)
@@ -130,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     spec = JobSpec(inputs=args.inputs, taxonomy=Taxonomy.from_file(args.taxonomy), model=args.model)
+    workers = WorkerSettings(args.ocr_workers, args.threads_per_worker)
     if args.output:
         with args.output.open("w", encoding="utf-8") as out:
-            return asyncio.run(_run(spec, out))
-    return asyncio.run(_run(spec, sys.stdout))
+            return asyncio.run(_run(spec, out, workers))
+    return asyncio.run(_run(spec, sys.stdout, workers))

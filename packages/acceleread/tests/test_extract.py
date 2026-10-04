@@ -82,9 +82,17 @@ def test_step_three_hook_can_send_a_clean_page_to_ocr() -> None:
     assert doc.pages[0].ocr_decision.jev_skipped is True
 
 
-def test_a_missing_language_pack_is_an_error() -> None:
+def test_a_missing_language_pack_is_an_error_only_when_a_page_needs_ocr() -> None:
     with pytest.raises(OcrLanguageUnavailable, match="de"):
         extract_pdf(FIXTURES / "scanned.pdf", ocr_languages=["de"])
+    text_only = extract_pdf(FIXTURES / "sample.pdf", ocr_languages=["de"])
+    assert text_only.text.startswith("NORTHWIND SOLAR")
+
+
+def test_page_counts_are_reported_once_the_ocr_rule_has_run() -> None:
+    seen: list[tuple[int, int]] = []
+    extract_pdf(FIXTURES / "mixed.pdf", on_page_counts=lambda pages, ocr: seen.append((pages, ocr)))
+    assert seen == [(2, 1)]
 
 
 def test_html_plain_extraction_drops_markup_scripts_and_styles(tmp_path: Path) -> None:

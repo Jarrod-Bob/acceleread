@@ -8,7 +8,7 @@ Pages it flags are rendered and recognised with Tesseract. Extraction never touc
 
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -20,6 +20,9 @@ from lxml import html
 
 from acceleread.models import Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
+
+PageCountsCallback = Callable[[int, int], None]
+"""Called with (pages in the Document, pages that will be OCRed)."""
 
 PAGE_SEPARATOR = "\n\n"
 OCR_DPI = 300
@@ -120,16 +123,15 @@ def extract_pdf(
     ocr_languages: Sequence[str] = ("en",),
     step3: Step3Hook | None = None,
     tessdata: Path = VENDORED_TESSDATA,
-    on_ocr_pages: Any = None,
+    on_page_counts: PageCountsCallback | None = None,
 ) -> Extracted:
     """Concatenate each Page's text, from the text layer or OCR as the OCR rule decides.
 
-    Pages are character ranges into the Document text. `on_ocr_pages(n)` is called once the rule
-    has run on every Page, with the number of Pages that will be OCRed (workers use it to size the
-    Document timeout).
+    Pages are character ranges into the Document text. `on_page_counts(pages, ocr_pages)` is called
+    once the rule has run on every Page (workers use it to size the Document timeout). A missing
+    Tesseract language pack raises `OcrLanguageUnavailable` only when a Page needs OCR.
     """
     languages = list(ocr_languages)
-    _tesseract_languages(languages, tessdata)  # fail before any work if a pack is missing
     pdf = pdfium.PdfDocument(path)
     ocr: TesseractOcr | None = None
     try:
@@ -152,8 +154,8 @@ def extract_pdf(
             layers.append((record, layer, verdict.ocr))
             page.close()
         flagged = sum(ocr_needed for _, _, ocr_needed in layers)
-        if on_ocr_pages is not None:
-            on_ocr_pages(flagged)
+        if on_page_counts is not None:
+            on_page_counts(len(layers), flagged)
 
         parts: list[str] = []
         pages: list[Page] = []

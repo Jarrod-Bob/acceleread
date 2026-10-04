@@ -5,6 +5,7 @@ Tracer scope (docs/spec/v0.md §5.3, §7): one request per Document and a naive 
 the text is over budget. Proper planning, storage and the runner arrive with later build issues.
 """
 
+import asyncio
 import hashlib
 import json
 import time
@@ -29,6 +30,7 @@ from acceleread.models import (
     Timings,
     Usage,
 )
+from acceleread.workers import ExtractTask, WorkerPool, WorkerSettings
 
 TAXONOMY_JUDGMENT = "taxonomy"
 HEAD_SHARE = 0.25
@@ -102,8 +104,29 @@ def _source(path: Path) -> Source:
     )
 
 
+async def _extract(path: Path, pool: WorkerPool | None) -> Extracted:
+    """Extract in a pool worker when there is one, else in this process."""
+    if pool is None:
+        return extract_pdf(path)
+    outcome = await asyncio.wrap_future(pool.submit(*ExtractTask(path, "pdf").for_pool()))
+    if not outcome.ok:
+        raise ExtractionFailed(outcome.code or "extract_error", outcome.message or "")
+    result: Extracted = outcome.result
+    return result
+
+
+class ExtractionFailed(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 async def ingest(
-    path: Path, taxonomy: Taxonomy, classifier: Classifier, job_id: str
+    path: Path,
+    taxonomy: Taxonomy,
+    classifier: Classifier,
+    job_id: str,
+    pool: WorkerPool | None = None,
 ) -> DocumentRecord:
     record = DocumentRecord(
         record_id=uuid.uuid4().hex,
@@ -115,12 +138,11 @@ async def ingest(
     timings = Timings()
     started = time.perf_counter()
     try:
-        doc = extract_pdf(path)
+        doc = await _extract(path, pool)
     except Exception as exc:  # any extraction failure still yields a Record
         record.status = "failed"
-        record.errors.append(
-            RecordError(stage="extract", code=type(exc).__name__, message=str(exc))
-        )
+        code = exc.code if isinstance(exc, ExtractionFailed) else type(exc).__name__
+        record.errors.append(RecordError(stage="extract", code=code, message=str(exc)))
         return record
     timings.extract_ms = round((time.perf_counter() - started) * 1000)
     record.text, record.pages = doc.text, doc.pages
@@ -156,12 +178,22 @@ async def ingest(
     return record
 
 
-async def run(spec: JobSpec, classifier: Classifier | None = None) -> AsyncIterator[DocumentRecord]:
-    """Yield one Document Record per input, in input order."""
+async def run(
+    spec: JobSpec, classifier: Classifier | None = None, workers: WorkerSettings | None = None
+) -> AsyncIterator[DocumentRecord]:
+    """Yield one Document Record per input, in input order.
+
+    With `workers`, Documents are extracted in a worker pool sized by those settings.
+    """
     if spec.taxonomy is None:
         raise ValueError("the tracer pipeline needs a Taxonomy; Question-only Jobs come later")
     classifier = classifier or JevClassifier(model=spec.model)
     taxonomy = spec.taxonomy.with_other()
     job_id = "job_" + uuid.uuid4().hex[:12]
-    for document in spec.inputs:
-        yield await ingest(Path(document.source), taxonomy, classifier, job_id)
+    pool = workers.pool() if workers is not None else None
+    try:
+        for document in spec.inputs:
+            yield await ingest(Path(document.source), taxonomy, classifier, job_id, pool)
+    finally:
+        if pool is not None:
+            pool.close()

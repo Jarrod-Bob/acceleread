@@ -5,12 +5,14 @@ Workers import them by dotted path (`worker_handlers:crash`), so they must be mo
 """
 
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-Report = Callable[[int], None]
+Report = Callable[[int, int], None]
 
 
 def echo(payload: Any, report: Report) -> Any:
@@ -44,9 +46,9 @@ def hang(payload: Any, report: Report) -> None:
 
 
 def sleep_after_report(payload: Any, report: Report) -> str:
-    """payload = (ocr_pages, seconds): announce OCR Pages, then work for a while."""
-    ocr_pages, seconds = payload
-    report(ocr_pages)
+    """payload = (pages, ocr_pages, seconds): announce the Page counts, then work a while."""
+    pages, ocr_pages, seconds = payload
+    report(pages, ocr_pages)
     time.sleep(seconds)
     return "done"
 
@@ -61,3 +63,25 @@ def hog(payload: Any, report: Report) -> None:
 
 def fail(payload: Any, report: Report) -> None:
     raise ValueError("this Document is broken")
+
+
+def _explode() -> None:
+    raise RuntimeError("cannot be unpickled")
+
+
+class Unloadable:
+    """Pickles fine in the worker but raises when the parent unpickles it."""
+
+    def __reduce__(self) -> tuple[Callable[[], None], tuple[()]]:
+        return (_explode, ())
+
+
+def unloadable(payload: Any, report: Report) -> Unloadable:
+    return Unloadable()
+
+
+def spawn_child_and_hang(payload: Any, report: Report) -> None:
+    """Start a grandchild that outlives its parent unless the whole tree is killed."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+    Path(payload).write_text(str(child.pid))
+    time.sleep(3600)
