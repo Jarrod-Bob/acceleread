@@ -1,0 +1,10 @@
+acceleread
+Copyright 2026 The acceleread Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+The list of authors is in the AUTHORS file; the full history of contributions
+is in the project's git history.
+
+SEC EDGAR filings referenced by corpus/ are owned by their filers. They are
+fetched by corpus/fetch.py, are not part of this repository and are not covered
+by this license.
