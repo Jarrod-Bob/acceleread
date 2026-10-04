@@ -6,4 +6,7 @@ acceleread depends only on permissively licensed code and model weights (MIT, BS
 
 - A new dependency's licence, and the licence of any model weights it downloads at runtime, must be checked before adoption. A weights licence can differ from the code's.
 - acceleread itself is **Apache-2.0** (decided in [Is acceleread MIT or Apache-2.0?](https://github.com/Jarrod-Bob/acceleread/issues/20)). CI enforces this ADR with a licence allowlist over each extra's resolved environment, and model weights and vendored assets are listed by hand in `THIRD_PARTY_NOTICES.md`.
+- **Amended (build, 2026-10-04): two reviewed exceptions,** recorded in `tools/license-exceptions.toml`.
+  - **LGPL is allowed only for unmodified dependencies installed as their own package and imported, never vendored.** This admits `cysignals` (LGPL-3.0+), a hard dependency of `tesserocr` in the core. It keeps Tesseract bundled with no system install. The Docker images ship its licence text.
+  - **`unidecode` (GPL-2.0+)** arrives through edgartools in the opt-in `[edgar]` extra. It is **never shipped in a Docker image**, so the default image leaves out `[edgar]`. Upstream has been asked to switch to `anyascii` (ISC).
 - Details: [Which PDF extraction and OCR engine should v0 use?](https://github.com/Jarrod-Bob/acceleread/issues/2)

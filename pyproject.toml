@@ -1,0 +1,36 @@
+# Workspace root (virtual: not itself a package). See docs/spec/v0.md §2.
+
+[tool.uv.workspace]
+members = ["packages/*", "examples/*"]
+
+[tool.uv.sources]
+acceleread = { workspace = true }
+acceleread-eval = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# corpus/ holds one-off research scripts, not package code.
+extend-exclude = ["corpus"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["acceleread", "acceleread_eval"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["packages/acceleread/src", "packages/acceleread-eval/src", "tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/acceleread/tests", "packages/acceleread-eval/tests"]
+addopts = "--import-mode=importlib"

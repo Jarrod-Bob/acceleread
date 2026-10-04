@@ -1,0 +1,6 @@
+# Reviewed licence exceptions for tools/check_licenses.py (ADR 0003).
+# package = "SPDX licence and why it is acceptable"
+
+httpxthrottlecache = "MIT per its repository (paultiq/httpxthrottlecache); the wheel carries no licence metadata. Pulled in by edgartools."
+cysignals = "LGPL-3.0-or-later. Hard dependency of tesserocr (core). Used unmodified, installed as its own replaceable package and only imported, never vendored; images ship its licence text. Allowed by the narrow LGPL rule in ADR 0003."
+unidecode = "GPL-2.0-or-later. Pulled in by edgartools, so only in the opt-in [edgar] extra. Never shipped in Docker images; upstream asked to switch to anyascii (ISC). ADR 0003 exception."
