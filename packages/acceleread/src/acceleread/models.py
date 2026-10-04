@@ -6,6 +6,7 @@ The tracer carries only the fields its thin slice fills; later build issues add 
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -18,6 +19,8 @@ DEFAULT_ESCALATION_MODEL = "claude-opus-5-5"
 DEFAULT_ESCALATION_MAX = 0.02  # share of a Job's Documents that may be escalated
 PRICE_TABLE_VERSION = "unpriced-0"  # placeholder until the versioned price table exists
 OTHER = "other"
+
+type ExtractionProfile = Literal["fast", "quality"]
 # The closed set of canonical Section keys (spec §4.4). Everything else is `other`, unreadable.
 CANONICAL_SECTION_KEYS = (
     "business",
@@ -33,23 +36,43 @@ CANONICAL_SECTION_KEYS = (
 )
 
 
-class Category(BaseModel):
+class _Strict(BaseModel):
+    """Base for everything a user writes in a spec file: a misspelt field is an error."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Category(_Strict):
     name: str
     description: str | None = None
 
 
 def _canonical_hash(model: BaseModel) -> str:
-    canonical = json.dumps(model.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """Unset optional fields are left out, so adding one later doesn't change old hashes."""
+    dumped = model.model_dump(mode="json", exclude_none=True)
+    canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
-class Taxonomy(BaseModel):
+def _reject_duplicate_names(what: str, items: list[Category]) -> None:
+    names = [c.name for c in items]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ValueError(f"duplicate {what} names: {', '.join(dupes)}")
+
+
+class Taxonomy(_Strict):
     """A flat set of Categories. `other` is added unless the user defines one."""
 
     name: str
     categories: list[Category] = Field(min_length=1)
     reads: list[str] | None = None  # canonical Section keys; None reads the whole Document
     escalate_below: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _unique_categories(self) -> Self:
+        _reject_duplicate_names("Category", self.categories)
+        return self
 
     @classmethod
     def from_file(cls, path: Path) -> "Taxonomy":
@@ -66,7 +89,7 @@ class Taxonomy(BaseModel):
         return _canonical_hash(self)
 
 
-class Question(BaseModel):
+class Question(_Strict):
     """A user-defined Judgment: a Noul, a Score (ordered criteria) or a Choice (named options)."""
 
     name: str
@@ -90,10 +113,11 @@ class Question(BaseModel):
             raise ValueError("a noul Question takes no criteria")
         if self.kind != "noul" and len(self.criteria) < 2:
             raise ValueError(f"a {self.kind} Question needs at least two criteria")
+        _reject_duplicate_names("criteria", self.criteria)
         return self
 
 
-class QuestionSet(BaseModel):
+class QuestionSet(_Strict):
     """A named, versioned file of Questions plus an optional Taxonomy."""
 
     name: str
@@ -118,7 +142,7 @@ class QuestionSet(BaseModel):
         return _canonical_hash(self)
 
 
-class LLMEscalation(BaseModel):
+class LLMEscalation(_Strict):
     """Opt-in automatic Escalation of low-confidence Judgments to an LLM (spec §5.5)."""
 
     enabled: bool = False
@@ -126,23 +150,27 @@ class LLMEscalation(BaseModel):
     escalation_max: float = Field(default=DEFAULT_ESCALATION_MAX, ge=0, le=1)
 
 
-class DocumentOverride(BaseModel):
+class DocumentOverride(_Strict):
     """Per-Document overrides of the Job's Extraction Profile and OCR languages."""
 
-    extraction_profile: Literal["fast", "quality"] | None = None
+    extraction_profile: ExtractionProfile | None = None
     ocr_languages: list[str] | None = Field(default=None, min_length=1)
 
 
-class JobSpec(BaseModel):
-    """The one Job spec used by the library, the HTTP API and the CLI (spec §7.1)."""
+class DocumentInput(_Strict):
+    """One input: a local path, glob or URL, kept verbatim, with optional caller-supplied data."""
 
-    model_config = ConfigDict(extra="forbid")
+    source: str
+    external_id: str | None = None
+    user_metadata: dict[str, Any] = Field(default_factory=dict)
 
-    inputs: list[Path] = Field(min_length=1)
-    taxonomy: Taxonomy | None = None
-    question_sets: list[Path] = Field(default_factory=list)
+
+class JobSettings(_Strict):
+    """The Job fields a manifest carries over unchanged from the spec."""
+
+    inputs: list[DocumentInput] = Field(min_length=1)
     questions: list[Question] = Field(default_factory=list)
-    extraction_profile: Literal["fast", "quality"] = "fast"
+    extraction_profile: ExtractionProfile = "fast"
     ocr_languages: list[str] = Field(default_factory=lambda: ["en"], min_length=1)
     overrides: dict[str, DocumentOverride] = Field(default_factory=dict)  # keyed by input path
     escalate_below: float | None = Field(default=None, ge=0, le=1)
@@ -151,6 +179,21 @@ class JobSpec(BaseModel):
     cache: bool = True
     user_agent: str | None = None
     model: str = DEFAULT_JEV_MODEL
+
+    @field_validator("inputs", mode="before")
+    @classmethod
+    def _plain_sources(cls, value: Any) -> Any:
+        """A bare string or path is a source; it is never resolved or turned into a Path."""
+        if not isinstance(value, list):
+            return value
+        return [{"source": os.fspath(v)} if isinstance(v, str | os.PathLike) else v for v in value]
+
+
+class JobSpec(JobSettings):
+    """The one Job spec used by the library, the HTTP API and the CLI (spec §7.1)."""
+
+    taxonomy: Taxonomy | None = None
+    question_sets: list[Path] = Field(default_factory=list)
 
 
 class TaxonomyRef(BaseModel):
@@ -169,26 +212,15 @@ class ResolvedSet(BaseModel):
     questions: list[Question]
 
 
-class ResolvedManifest(BaseModel):
+class ResolvedManifest(JobSettings):
     """The resolved Job spec: Sets inlined, defaults filled, price-table version recorded.
 
     Immutable once the Job starts, except `max_cost_usd` (spec §7.1).
     """
 
-    inputs: list[Path]
     taxonomy: Taxonomy | None  # the Job's or its Set's, with `other` added
     taxonomy_ref: TaxonomyRef | None
     question_sets: list[ResolvedSet]
-    questions: list[Question]  # inline Questions
-    extraction_profile: Literal["fast", "quality"]
-    ocr_languages: list[str]
-    overrides: dict[str, DocumentOverride]
-    escalate_below: float | None
-    llm_escalation: LLMEscalation
-    max_cost_usd: float | None
-    cache: bool
-    user_agent: str | None
-    model: str
     price_table_version: str
 
 
@@ -342,7 +374,7 @@ class DocumentRecord(BaseModel):
     attempts: int = 1
     source: Source
     metadata: dict[str, MetadataField] = Field(default_factory=dict)
-    extraction_profile: Literal["fast", "quality"] = "fast"
+    extraction_profile: ExtractionProfile = "fast"
     text: str | None = None
     pages: list[Page] = Field(default_factory=list)
     sections: list[Section] = Field(default_factory=list)

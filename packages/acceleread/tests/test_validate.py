@@ -15,7 +15,7 @@ from acceleread.models import (
     QuestionSet,
     Taxonomy,
 )
-from acceleread.validate import SpecError, ValidationReport, resolve, validate
+from acceleread.validate import Finding, SpecError, ValidationReport, resolve, validate
 
 SETS = Path(__file__).parent / "fixtures" / "sets"
 FILING_RISK = SETS / "filing_risk.yaml"
@@ -30,12 +30,12 @@ def noul(name: str = "q", instructions: str = "Is `document` a filing?", **kw: o
 
 
 def spec(**kw: object) -> JobSpec:
-    kw.setdefault("inputs", [Path("a.pdf")])
+    kw.setdefault("inputs", ["a.pdf"])
     return JobSpec.model_validate(kw)
 
 
-def codes(issues: list) -> list[str]:  # type: ignore[type-arg]
-    return [i.code for i in issues]
+def codes(findings: list[Finding]) -> list[str]:
+    return [f.code for f in findings]
 
 
 def test_a_taxonomy_alone_or_a_question_alone_is_a_valid_job() -> None:
@@ -133,7 +133,13 @@ def test_other_cannot_be_read() -> None:
 
 
 def test_ocr_languages_must_be_known_and_installed() -> None:
-    assert validate(spec(taxonomy=taxonomy("a"), ocr_languages=["en", "de"])).ok
+    assert validate(spec(taxonomy=taxonomy("a"), ocr_languages=["en"])).ok
+    de = validate(spec(taxonomy=taxonomy("a"), ocr_languages=["de"]))  # only English is vendored
+    assert codes(de.errors) == ["unsupported_ocr_language"]
+    assert "ocr add-language de" in de.errors[0].message
+    assert validate(
+        spec(taxonomy=taxonomy("a"), ocr_languages=["de"]), installed_languages={"en", "de"}
+    ).ok
     unknown = validate(spec(taxonomy=taxonomy("a"), ocr_languages=["xx"]))
     assert codes(unknown.errors) == ["unsupported_ocr_language"]
     auto = validate(spec(taxonomy=taxonomy("a"), ocr_languages=["auto"]))
@@ -146,17 +152,23 @@ def test_ocr_languages_must_be_known_and_installed() -> None:
     assert installed.ok
 
 
-def test_the_quality_profile_serves_only_latin_script_languages() -> None:
-    both = {"en", "ja"}
-    job = spec(taxonomy=taxonomy("a"), extraction_profile="quality", ocr_languages=["ja"])
-    assert codes(validate(job, installed_languages=both).errors) == ["unsupported_ocr_language"]
+def test_the_quality_profile_checks_rapidocr_support_not_tesseract_packs() -> None:
+    # RapidOCR's latin family serves German without any Tesseract pack installed.
+    latin = spec(taxonomy=taxonomy("a"), extraction_profile="quality", ocr_languages=["de"])
+    assert validate(latin).ok
+    # Japanese is outside the latin family, even with its Tesseract pack installed.
+    ja = spec(taxonomy=taxonomy("a"), extraction_profile="quality", ocr_languages=["ja"])
+    report = validate(ja, installed_languages={"en", "ja"})
+    assert codes(report.errors) == ["unsupported_ocr_language"]
+    assert "quality" in report.errors[0].message
+    # the fast Profile still needs the pack
     fast = spec(taxonomy=taxonomy("a"), ocr_languages=["ja"])
-    assert validate(fast, installed_languages=both).ok
+    assert validate(fast, installed_languages={"en", "ja"}).ok
 
 
 def test_per_document_overrides_are_validated_with_their_own_profile() -> None:
     job = spec(
-        inputs=[Path("a.pdf"), Path("b.pdf")],
+        inputs=["a.pdf", {"source": "b.pdf"}],
         taxonomy=taxonomy("a"),
         overrides={"b.pdf": DocumentOverride(ocr_languages=["xx"])},
     )
@@ -206,7 +218,33 @@ def test_manifest_takes_the_taxonomy_from_a_question_set() -> None:
     assert manifest.taxonomy.categories[-1].name == "other"
 
 
-def test_resolving_an_invalid_spec_raises_with_the_issues() -> None:
+def test_resolving_an_invalid_spec_raises_with_the_findings() -> None:
     with pytest.raises(SpecError) as caught:
         resolve(spec())
-    assert codes(caught.value.issues) == ["no_judgments"]
+    assert codes(caught.value.findings) == ["no_judgments"]
+
+
+def test_an_unreadable_set_does_not_also_report_no_judgments(tmp_path: Path) -> None:
+    report = validate(spec(question_sets=[tmp_path / "missing.yaml"]))
+    assert codes(report.errors) == ["question_set_unreadable"]
+
+
+def test_the_taxonomy_name_joins_the_namespace_and_each_clash_is_reported_once() -> None:
+    clash = validate(spec(taxonomy=taxonomy("a"), questions=[noul("t")]))  # Taxonomy is named "t"
+    assert codes(clash.errors) == ["duplicate_name"]
+    thrice = validate(spec(questions=[noul("x"), noul("x"), noul("x")]))
+    assert codes(thrice.errors) == ["duplicate_name"]
+
+
+def test_a_score_question_is_not_subject_to_the_budget_warning() -> None:
+    wordy = [Category(name="lo", description="x" * 30_000), Category(name="hi")]
+    score = Question(name="s", kind="score", instructions="Rate `document`", criteria=wordy)
+    assert validate(spec(questions=[score])).warnings == []
+    choice = score.model_copy(update={"kind": "choice"})
+    assert codes(validate(spec(questions=[choice])).warnings) == ["taxonomy_budget"]
+
+
+def test_the_manifest_carries_every_job_spec_field() -> None:
+    from acceleread.models import ResolvedManifest
+
+    assert set(JobSpec.model_fields) - {"question_sets"} <= set(ResolvedManifest.model_fields)

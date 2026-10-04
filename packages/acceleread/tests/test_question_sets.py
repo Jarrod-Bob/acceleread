@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from acceleread.models import Question, QuestionSet
+from acceleread.models import Category, Question, QuestionSet, Taxonomy
 
 SETS = Path(__file__).parent / "fixtures" / "sets"
 
@@ -55,3 +55,47 @@ def test_hash_is_stable_and_tracks_content() -> None:
 def test_malformed_questions_are_rejected(bad: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         Question.model_validate(bad)
+
+
+def test_a_misspelled_field_in_a_set_file_is_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "set.yaml"
+    path.write_text(
+        "name: s\nversion: 1\nquestions:\n"
+        "  - {name: q, kind: noul, instructions: x, escalate_bellow: 0.5}\n"
+    )
+    with pytest.raises(ValidationError, match="escalate_bellow"):
+        QuestionSet.from_file(path)
+
+
+@pytest.mark.parametrize(
+    ("model", "bad"),
+    [
+        (Taxonomy, {"name": "t", "categories": [{"name": "a"}], "escalate_bellow": 0.1}),
+        (Taxonomy, {"name": "t", "categories": [{"name": "a", "descripton": "x"}]}),
+        (QuestionSet, {"name": "s", "version": "1", "questions": [], "taxonomi": {}}),
+    ],
+)
+def test_every_spec_file_model_forbids_unknown_fields(
+    model: type[Taxonomy] | type[QuestionSet], bad: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(bad)
+
+
+def test_taxonomy_hash_ignores_unset_optional_fields() -> None:
+    plain = Taxonomy(name="t", categories=[Category(name="a", description="x")])
+    # Pinned: adding optional fields to the models must not change an unchanged Taxonomy's hash.
+    assert plain.hash == "sha256:cec99bf699157e592cf889965d151637bea5f147e1290305c9689c3984727b6e"
+    assert plain.model_copy(update={"reads": ["business"]}).hash != plain.hash
+
+
+def test_duplicate_category_and_criteria_names_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate"):
+        Taxonomy(name="t", categories=[Category(name="a"), Category(name="a")])
+    with pytest.raises(ValidationError, match="duplicate"):
+        Question(
+            name="q",
+            kind="score",
+            instructions="x",
+            criteria=[Category(name="lo"), Category(name="lo")],
+        )

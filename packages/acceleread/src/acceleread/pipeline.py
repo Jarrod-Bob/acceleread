@@ -163,5 +163,5 @@ async def run(spec: JobSpec, classifier: Classifier | None = None) -> AsyncItera
     classifier = classifier or JevClassifier(model=spec.model)
     taxonomy = spec.taxonomy.with_other()
     job_id = "job_" + uuid.uuid4().hex[:12]
-    for path in spec.inputs:
-        yield await ingest(path, taxonomy, classifier, job_id)
+    for document in spec.inputs:
+        yield await ingest(Path(document.source), taxonomy, classifier, job_id)

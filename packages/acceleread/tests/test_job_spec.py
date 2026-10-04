@@ -7,7 +7,13 @@ import pytest
 from pydantic import ValidationError
 
 from acceleread import JobSpec, Taxonomy
-from acceleread.models import Category, DocumentOverride, LLMEscalation, Question
+from acceleread.models import (
+    Category,
+    DocumentInput,
+    DocumentOverride,
+    LLMEscalation,
+    Question,
+)
 
 TAXONOMY = Taxonomy(name="t", categories=[Category(name="a")])
 
@@ -65,3 +71,25 @@ def test_carries_questions_sets_and_per_document_overrides() -> None:
 def test_invalid_specs_are_rejected(bad: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         JobSpec.model_validate(bad)
+
+
+def test_inputs_are_verbatim_strings_or_objects_with_ids_and_metadata() -> None:
+    spec = JobSpec.model_validate(
+        {
+            "inputs": [
+                "https://example.test/a.pdf?x=1",
+                "reports/*.pdf",
+                Path("local.pdf"),
+                {"source": "b.pdf", "external_id": "ext-1", "user_metadata": {"batch": 3}},
+            ]
+        }
+    )
+    assert [i.source for i in spec.inputs] == [
+        "https://example.test/a.pdf?x=1",
+        "reports/*.pdf",
+        "local.pdf",
+        "b.pdf",
+    ]
+    assert spec.inputs[0] == DocumentInput(source="https://example.test/a.pdf?x=1")
+    assert spec.inputs[3].external_id == "ext-1" and spec.inputs[3].user_metadata == {"batch": 3}
+    assert JobSpec.model_validate(spec.model_dump(mode="json")) == spec
