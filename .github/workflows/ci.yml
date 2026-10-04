@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-packages --python 3.12
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - name: SPDX headers
+        run: uv run python tools/check_spdx.py
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-packages --python ${{ matrix.python }}
+      - run: uv run pytest
+
+  licences:
+    # ADR 0003: every extra's resolved environment must stay within the allowlist.
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [core, llm, edgar, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install acceleread${{ matrix.extra != 'core' && format('[{0}]', matrix.extra) || '' }}
+        run: |
+          if [ "${{ matrix.extra }}" = core ]; then extra=(); else extra=(--extra "${{ matrix.extra }}"); fi
+          uv sync --locked --no-dev --package acceleread --python 3.12 "${extra[@]}"
+      - run: uv run --no-sync python tools/check_licenses.py
