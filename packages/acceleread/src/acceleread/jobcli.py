@@ -187,6 +187,13 @@ def open_workspace(args: argparse.Namespace) -> Iterator[Workspace]:
         yield workspace
 
 
+def describe_request(kind: str, *, live_holder: bool) -> str:
+    """What a posted request will do next, said honestly: a runner applies it, or the next one."""
+    if live_holder:
+        return f"{kind} requested; the running runner applies it shortly"
+    return f"{kind} requested; no runner is running, so the next runner will apply it"
+
+
 # One interface for the in-process Workspace and a remote server: commands call a Backend and
 # never ask which one it is.
 
@@ -247,7 +254,7 @@ class LocalBackend:
             raise CliError(str(err)) from err
         if outcome == "cancelled":
             return f"cancelled {job_id}"
-        return f"cancel requested for {job_id}; the running Job stops shortly"
+        return describe_request("cancel", live_holder=self.ws.lease_holder() is not None)
 
     def requeue(self, kind: Literal["resume", "retry"], job_id: str) -> Requeue:
         try:
@@ -460,7 +467,7 @@ def _requeue(args: argparse.Namespace, make_classifier: ClassifierFactory) -> in
     with open_backend(args) as backend:
         result = backend.requeue(args.command, args.job_id)
         if result.requested:
-            print(f"{args.command} requested for {args.job_id}; the running runner applies it")
+            print(describe_request(args.command, live_holder=result.live_holder))
             return 0
         if result.count == 0:
             print(f"nothing to {args.command} in {args.job_id}")

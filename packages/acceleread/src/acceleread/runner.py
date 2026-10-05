@@ -14,15 +14,23 @@ holder applies. Nothing here logs Document text or Classifier state.
 import asyncio
 import logging
 import os
+import sqlite3
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from acceleread.classifier import Classifier
+from acceleread.classifier import (
+    Ask,
+    Capabilities,
+    Classifier,
+    ClassifierError,
+    ClassifierResponse,
+    JSONState,
+)
 from acceleread.config import load_config
 from acceleread.extract import VENDORED_TESSDATA
 from acceleread.jev import JEV_RATE_LIMIT, JevClassifier
@@ -42,7 +50,7 @@ from acceleread.jobcontrol import (
     workspace_prices,
 )
 from acceleread.languages import installed_languages, workspace_tessdata
-from acceleread.models import DocumentRecord, JobSpec, ResolvedManifest, Usage
+from acceleread.models import DocumentRecord, JobSpec, RecordError, ResolvedManifest, Usage
 from acceleread.pipeline import (
     ClassifyResult,
     Extractor,
@@ -83,6 +91,28 @@ type Sleep = Callable[[float], Awaitable[None]]
 
 class LeaseLostError(RuntimeError):
     """This runner's lease went stale and another runner took it: stop without finalising."""
+
+
+class JobStopping(ClassifierError):
+    """The Job is stopping: no new Classifier request may start (in-flight ones finish)."""
+
+
+class _StopGate:
+    """The Classifier as the Job's Documents see it: closed to new requests once the Job stops,
+    so the grace period only lets calls already sent finish."""
+
+    def __init__(self, inner: Classifier, stop: asyncio.Event) -> None:
+        self._inner = inner
+        self._stop = stop
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return self._inner.capabilities
+
+    async def judge(self, state: JSONState, judgments: Mapping[str, Ask]) -> ClassifierResponse:
+        if self._stop.is_set():
+            raise JobStopping("the Job is stopping")
+        return await self._inner.judge(state, judgments)
 
 
 def default_ceiling(classifier: Classifier) -> RateLimit:
@@ -165,7 +195,7 @@ class Runner:
         self.holds_lease = self.workspace.acquire_lease(self.holder, self.lease_ttl)
         if self.holds_lease:
             recover_orphans(self.workspace)
-            apply_requests(self.workspace)
+            self.apply_requests()
         return self.holds_lease
 
     def release(self) -> None:
@@ -174,8 +204,19 @@ class Runner:
             self.holds_lease = False
 
     def apply_requests(self) -> int:
-        """Apply cancel, resume and retry requests other processes posted (we are the writer)."""
-        return apply_requests(self.workspace)
+        """Apply cancel, resume and retry requests other processes posted (we are the writer).
+        Nothing a request can do (a locked database, a bad Job) is allowed to stop the runner."""
+        try:
+            return apply_requests(self.workspace)
+        except Exception as exc:
+            logger.error("could not apply requests: %s", type(exc).__name__)
+            return 0
+
+    def _queued(self, job_id: str) -> bool:
+        try:
+            return self.workspace.get_job(job_id).state == "queued"
+        except KeyError:
+            return False
 
     async def _run_one(self, job_id: str) -> bool:
         """Execute one Job. A Job that fails is logged and finalised `failed`, never fatal to the
@@ -190,12 +231,19 @@ class Runner:
         return True
 
     async def drain(self, until: str | None = None) -> None:
-        """Run queued Jobs in FIFO order until the queue is empty, or `until` has been run."""
-        if not (self.holds_lease or self.acquire()):
-            raise LeaseLostError("another runner holds the lease")
+        """Run queued Jobs in FIFO order until the queue is empty, or `until` has run, ended or
+        gone: a caller that only wants its own Job never runs the Jobs queued after it.
+
+        Waits while a short-lived control writer holds the lease, like `serve` does.
+        """
+        while not (self.holds_lease or self.acquire()):
+            if until is not None and not self._queued(until):
+                return
+            await self.sleep(self.poll_interval)
         try:
-            while (job_id := self.workspace.next_queued()) is not None:
-                if not await self._run_one(job_id) or job_id == until:
+            while until is None or self._queued(until):
+                job_id = self.workspace.next_queued()
+                if job_id is None or not await self._run_one(job_id):
                     return
                 self.apply_requests()
         finally:
@@ -204,7 +252,8 @@ class Runner:
     async def serve(self, stop: asyncio.Event) -> None:
         """Run Jobs as they are queued until `stop` is set: the long-lived runner (`serve`).
 
-        It holds the lease while idle too, so a `run` from another process joins its FIFO.
+        It holds the lease while idle too, so a `run` from another process joins its FIFO. A stop
+        during a Job cancels it (with the usual grace) rather than waiting for it to finish.
         """
         ws = self.workspace
         try:
@@ -215,12 +264,23 @@ class Runner:
                 self.apply_requests()
                 job_id = ws.next_queued()
                 if job_id is not None:
-                    await self._run_one(job_id)
+                    await self._run_until_stop(job_id, stop)
                     continue
                 self.holds_lease = ws.heartbeat(self.holder)
                 await self._idle(stop)
         finally:
             self.release()
+
+    async def _run_until_stop(self, job_id: str, stop: asyncio.Event) -> None:
+        running = asyncio.create_task(self._run_one(job_id))
+        stopper = asyncio.create_task(stop.wait())
+        try:
+            await asyncio.wait({running, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if not running.done():
+                post_request(self.workspace, "cancel", job_id, "user")
+                await running
+        finally:
+            stopper.cancel()
 
     async def _idle(self, stop: asyncio.Event) -> None:
         with suppress(TimeoutError):
@@ -287,9 +347,13 @@ class _JobRun:
         self.cache = self.ws.cache if manifest.cache else None
         self.prices = workspace_prices(self.ws)
         self.stop = asyncio.Event()
+        self.classifier: Classifier = _StopGate(runner.classifier, self.stop)
         self.cancel_reason: CancelReason | None = None
         self.lease_lost = False
+        self.last_beat = runner.clock()
+        self.last_beat_ok = self.last_beat
         self.spent = 0.0
+        self.cancelled_docs = 0  # Documents the stop cut short while they were being judged
         self.pool: WorkerPool | None = None
         # Documents allowed between "extraction began" and "classification began".
         self.room = asyncio.Semaphore(max(1, runner.backpressure))
@@ -308,6 +372,22 @@ class _JobRun:
         cap = load_manifest(self.ws, self.job_id).max_cost_usd
         if cap is not None and self.spent >= cap:
             self.trigger_cancel("spend_cap")
+
+    def beat(self) -> None:
+        """Heartbeat the lease if one is due. Called from the monitor and from long synchronous
+        stretches (finalising), so a big Job can't go stale. Raises `LeaseLostError`."""
+        runner = self.runner
+        if not runner.holds_lease:
+            return
+        now = runner.clock()
+        if now - self.last_beat < runner.lease_ttl / 3:
+            return
+        self.last_beat = now
+        if not self.ws.heartbeat(runner.holder):
+            # Never take the lease back mid-Job: whoever has it recovers this Job.
+            runner.holds_lease = False
+            raise LeaseLostError("the runner lease was lost")
+        self.last_beat_ok = now
 
     async def run(self) -> JobState:
         runner = self.runner
@@ -339,9 +419,15 @@ class _JobRun:
         try:
             while not consumed.done() and not self.stop.is_set():
                 waiting: set[asyncio.Future[Any]] = {
-                    f for f in (consumed, feeder, stopper) if not f.done()
+                    f for f in (consumed, feeder, stopper, monitor) if not f.done()
                 }
                 await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                if monitor.done() and not self.stop.is_set():
+                    # The monitor owns the heartbeat and the requests: without it the Job must
+                    # not run on, or another runner will recover it while we still write.
+                    logger.error("Job %s: the monitor died; stopping", self.job_id)
+                    self.lease_lost = True
+                    self.stop.set()
                 if feeder.done() and feeder.exception() is not None:
                     break
             if self.stop.is_set():
@@ -383,17 +469,20 @@ class _JobRun:
         reason = self.cancel_reason
         swept = 0
         if reason is not None:
-            swept = sweep_unfinished(self.ws, self.job_id, self.store, self.manifest)
-        if reason is not None and (swept or reason in AUTO_CANCEL_REASONS):
+            swept = sweep_unfinished(
+                self.ws, self.job_id, self.store, self.manifest, tick=self.beat
+            )
+        if reason is not None and (swept or self.cancelled_docs or reason in AUTO_CANCEL_REASONS):
             finalize_job(
                 self.ws,
                 self.job_id,
                 "cancelled",
                 cancel_reason=reason,
                 live=self.live(),
+                tick=self.beat,
             )
             return "cancelled"
-        finalize_job(self.ws, self.job_id, "done", live=self.live())
+        finalize_job(self.ws, self.job_id, "done", live=self.live(), tick=self.beat)
         return "done"
 
     def live(self) -> dict[str, Any]:
@@ -402,24 +491,31 @@ class _JobRun:
         return {"stalled": limiter.stalled, "classifier": limiter.rate_summary()}
 
     async def monitor(self) -> None:
-        """Heartbeat the lease, apply posted requests, and watch the pool's crash-rate cancel."""
+        """Heartbeat the lease, apply posted requests, and watch the pool's crash-rate cancel.
+
+        A transient SQLite error is retried on the next tick (until the lease would have gone
+        stale anyway); a request that cannot be applied is dropped by `apply_requests`.
+        """
         runner = self.runner
-        beat_every = runner.lease_ttl / 3
-        last_beat = runner.clock()
         while True:
             await runner.sleep(runner.poll_interval)
-            if runner.holds_lease:
-                if runner.clock() - last_beat >= beat_every:
-                    last_beat = runner.clock()
-                    if not self.ws.heartbeat(runner.holder):
-                        # Never take the lease back mid-Job: whoever has it recovers this Job.
-                        runner.holds_lease = False
-                        self.lease_lost = True
-                        self.stop.set()
-                        return
-                apply_requests(self.ws, running=self.job_id, on_cancel=self.trigger_cancel)
-            if self.pool is not None and self.pool.cancel_reason == "crash_rate":
-                self.trigger_cancel("crash_rate")
+            try:
+                self.beat()
+                if runner.holds_lease:
+                    apply_requests(self.ws, running=self.job_id, on_cancel=self.trigger_cancel)
+                if self.pool is not None and self.pool.cancel_reason == "crash_rate":
+                    self.trigger_cancel("crash_rate")
+            except LeaseLostError:
+                self.lease_lost = True
+                self.stop.set()
+                return
+            except sqlite3.OperationalError as exc:
+                logger.warning("Job %s: monitor will retry after: %s", self.job_id, exc)
+                if runner.clock() - self.last_beat_ok > runner.lease_ttl:
+                    runner.holds_lease = False  # it would have gone stale: treat it as lost
+                    self.lease_lost = True
+                    self.stop.set()
+                    return
 
     # Extraction
 
@@ -504,10 +600,38 @@ class _JobRun:
         if record is None:
             return
         store.set_state(doc_id, "classifying")
-        result: ClassifyResult = await classify_stage(
-            record, self.manifest, self.specs, self.runner.classifier, self.cache
-        )
+        try:
+            result: ClassifyResult = await classify_stage(
+                record, self.manifest, self.specs, self.classifier, self.cache
+            )
+        except asyncio.CancelledError:
+            # Cut off at the end of the grace period: keep what is known, and say what is not.
+            record.errors.append(
+                RecordError(
+                    stage="classify",
+                    code="cancelled_in_flight",
+                    message="the Classifier call was cut off when the Job was cancelled; "
+                    "its cost is not known",
+                )
+            )
+            record.status = "cancelled"
+            store.save_record(doc_id, "cancelled", record)
+            self.cancelled_docs += 1
+            raise
         record = await self.after_first_pass(result.record)
+        if any(e.code == "JobStopping" for e in record.errors):
+            # The Job stopped between this Document's request groups: keep the groups that were
+            # judged (and billed), and mark the Document cancelled.
+            record.errors = [e for e in record.errors if e.code != "JobStopping"]
+            record.errors.append(
+                RecordError(
+                    stage="classify",
+                    code="cancelled",
+                    message="the Job was cancelled before every request group was judged",
+                )
+            )
+            record.status = "cancelled"
+            self.cancelled_docs += 1
         state: DocumentState = (
             "failed"
             if record.status == "failed"
@@ -515,9 +639,9 @@ class _JobRun:
             if record.status == "cancelled"
             else "done"
         )
-        store.save_record(doc_id, state, record)
         cost = record_cost(record, self.model, self.prices)  # this attempt's usage only
-        add_spend(self.ws, self.job_id, doc_id, cost)
+        add_spend(self.ws, self.job_id, doc_id, cost)  # before the Record: a crash can't lose it
+        store.save_record(doc_id, state, record)
         self.spent += cost
         if record.status in ("ok", "partial"):
             touch_progress(self.ws, self.job_id)

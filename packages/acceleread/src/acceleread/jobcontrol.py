@@ -8,8 +8,10 @@ applies; with no live holder the caller takes the lease itself for the duration 
 """
 
 import json
+import logging
 import math
 import os
+import sqlite3
 import time
 import uuid
 from collections import Counter
@@ -25,14 +27,14 @@ from acceleread.pipeline import new_record
 from acceleread.pricing import estimate_cost_usd, is_priced
 from acceleread.ratelimit import STALL_AFTER
 from acceleread.workspace import (
-    JobPrunedError,
     JobRunningError,
     JobState,
     JobStore,
-    StorageVersionError,
     Workspace,
 )
 from acceleread.workspace.catalog import FINISHED_STATES
+
+logger = logging.getLogger(__name__)
 
 type CancelReason = Literal["user", "crash_rate", "classifier_rejected", "spend_cap"]
 type RequestKind = Literal["cancel", "resume", "retry"]
@@ -57,6 +59,7 @@ class Requeue:
 
     count: int
     requested: bool = False
+    live_holder: bool = True  # whether a runner held the lease just after the request was posted
 
 
 # Manifest
@@ -116,19 +119,30 @@ def _ledger(ws: Workspace, job_id: str) -> Path:
 
 
 def add_spend(ws: Workspace, job_id: str, doc_id: str, usd: float) -> None:
-    """Append what one classification attempt cost. The Record holds only the latest attempt's
-    usage, so this ledger keeps the Job's true spend (and the spend cap) across retries."""
+    """Append what one classification attempt cost, durably. The Record holds only the latest
+    attempt's usage, so this ledger keeps the Job's true spend (and the spend cap) across
+    retries. The runner writes it before the Record, so a crash can over-count but never lose
+    spend."""
     if usd > 0:
         with _ledger(ws, job_id).open("a", encoding="utf-8") as ledger:
             ledger.write(f"{doc_id} {usd!r}\n")
+            ledger.flush()
+            os.fsync(ledger.fileno())
 
 
 def job_spend(ws: Workspace, job_id: str) -> float:
+    """The ledger's total. A torn last line (died mid-append) is ignored."""
     try:
         text = _ledger(ws, job_id).read_text("utf-8")
     except FileNotFoundError:
         return 0.0
-    return sum(float(line.split()[1]) for line in text.splitlines() if line.strip())
+    total = 0.0
+    for line in text.splitlines():
+        try:
+            total += float(line.split()[1])
+        except (IndexError, ValueError):
+            continue
+    return total
 
 
 def progress_marker(ws: Workspace, job_id: str) -> Path:
@@ -185,9 +199,15 @@ def pending_requests(ws: Workspace) -> list[ControlRequest]:
     return found
 
 
-def discard_requests(ws: Workspace, job_id: str, kind: RequestKind | None = None) -> None:
+def discard_requests(
+    ws: Workspace, job_id: str, kind: RequestKind | None = None, *, before: str | None = None
+) -> None:
+    """Drop a Job's pending requests. With `before` (a request's file name), only those posted
+    earlier: a request posted after it is a newer decision and stays."""
     for request in pending_requests(ws):
-        if request.job_id == job_id and kind in (None, request.kind):
+        if request.job_id != job_id or kind not in (None, request.kind):
+            continue
+        if before is None or request.path.name < before:
             request.path.unlink(missing_ok=True)
 
 
@@ -214,7 +234,11 @@ def recover_orphans(ws: Workspace) -> None:
 
 
 def sweep_unfinished(
-    ws: Workspace, job_id: str, store: JobStore, manifest: ResolvedManifest
+    ws: Workspace,
+    job_id: str,
+    store: JobStore,
+    manifest: ResolvedManifest,
+    tick: Callable[[], None] | None = None,
 ) -> int:
     """Give every Document the Job left unprocessed a `cancelled` Record (spec §6).
 
@@ -223,6 +247,8 @@ def sweep_unfinished(
     """
     swept = 0
     for doc_id, state in store.states().items():
+        if tick is not None:
+            tick()  # the caller keeps its lease alive through a long sweep
         if state not in LIVE_STATES:
             continue
         record = store.get_record(doc_id)
@@ -247,18 +273,19 @@ def finish_cancelled(ws: Workspace, job_id: str, reason: CancelReason) -> None:
     finalize_job(ws, job_id, "cancelled", cancel_reason=reason)
 
 
-def resume_direct(ws: Workspace, job_id: str) -> int:
+def resume_direct(ws: Workspace, job_id: str, before: str | None = None) -> int:
     with ws.open_job(job_id) as store:
         waiting = [d for d, s in store.states().items() if s in ("cancelled", *LIVE_STATES)]
         for doc_id in waiting:
             store.set_state(doc_id, "queued")
     if waiting:
-        discard_requests(ws, job_id, "cancel")  # a stale cancel must not kill the resumed Job
+        # A stale cancel must not kill the resumed Job; one posted after the request stays.
+        discard_requests(ws, job_id, "cancel", before=before)
         ws.set_job_state(job_id, "queued")
     return len(waiting)
 
 
-def retry_direct(ws: Workspace, job_id: str) -> int:
+def retry_direct(ws: Workspace, job_id: str, before: str | None = None) -> int:
     """Re-queue failed Documents. Each Record stays until its new attempt replaces it, so a
     Document whose text was extracted is not extracted again, and `attempts` counts up."""
     with ws.open_job(job_id) as store:
@@ -266,9 +293,37 @@ def retry_direct(ws: Workspace, job_id: str) -> int:
         for doc_id in failed_docs:
             store.set_state(doc_id, "queued")
     if failed_docs:
-        discard_requests(ws, job_id, "cancel")
+        discard_requests(ws, job_id, "cancel", before=before)
         ws.set_job_state(job_id, "queued")
     return len(failed_docs)
+
+
+def _apply_one(
+    ws: Workspace,
+    request: ControlRequest,
+    running: str | None,
+    on_cancel: Callable[[CancelReason], None] | None,
+) -> bool:
+    """Apply one request. True if it is done with and can go; False to keep it for later."""
+    info = ws.get_job(request.job_id)
+    if request.kind == "cancel":
+        if info.state in FINISHED_STATES:
+            logger.info("dropped cancel for %s: it already finished", request.job_id)
+        elif request.job_id == running and on_cancel is not None:
+            on_cancel(request.reason or "user")
+        elif info.state == "queued":
+            finish_cancelled(ws, request.job_id, request.reason or "user")
+        return True
+    if request.kind not in ("resume", "retry"):
+        logger.warning("dropped a request of unknown kind %r", request.kind)
+        return True
+    if info.state == "running":
+        return False  # claimed before we got to it: apply it once the Job has ended
+    direct = resume_direct if request.kind == "resume" else retry_direct
+    count = direct(ws, request.job_id, before=request.path.name)
+    if count == 0:
+        logger.info("%s for %s had nothing to re-queue", request.kind, request.job_id)
+    return True
 
 
 def apply_requests(
@@ -280,27 +335,21 @@ def apply_requests(
     """Apply posted requests, oldest first. Call only while holding the lease.
 
     `running` is the Job being executed now: a cancel for it goes to `on_cancel`; a resume or
-    retry for it is refused. A request for a Job that is gone or finished is dropped.
+    retry for a running Job waits until it ends. A request that cannot be applied (the Job is
+    gone, its files are unreadable) is logged and dropped, never fatal to the caller.
     """
     applied = 0
     for request in pending_requests(ws):
         try:
-            info = ws.get_job(request.job_id)
-            if request.kind == "cancel":
-                if info.state in FINISHED_STATES:
-                    pass
-                elif request.job_id == running and on_cancel is not None:
-                    on_cancel(request.reason or "user")
-                    applied += 1
-                elif info.state == "queued":
-                    finish_cancelled(ws, request.job_id, request.reason or "user")
-                    applied += 1
-            elif info.state != "running":
-                direct = resume_direct if request.kind == "resume" else retry_direct
-                direct(ws, request.job_id)
-                applied += 1
-        except (KeyError, JobPrunedError, StorageVersionError, FileNotFoundError):
-            pass  # the Job is gone or cannot be written: drop the request
+            if not _apply_one(ws, request, running, on_cancel):
+                continue
+            applied += 1
+        except sqlite3.OperationalError:
+            raise  # transient (locked): leave the request for the next tick
+        except Exception as exc:
+            logger.error(
+                "dropped %s request for %s: %s", request.kind, request.job_id, type(exc).__name__
+            )
         request.path.unlink(missing_ok=True)
     return applied
 
@@ -336,7 +385,7 @@ def _requeue(
             apply_requests(ws)
             return Requeue(direct(ws, job_id))
     post_request(ws, kind, job_id)
-    return Requeue(0, requested=True)
+    return Requeue(0, requested=True, live_holder=ws.lease_holder() is not None)
 
 
 def resume_job(ws: Workspace, job_id: str) -> Requeue:
@@ -378,6 +427,7 @@ def job_summary(
     cancel_reason: str | None = None,
     error: str | None = None,
     now: float | None = None,
+    tick: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """The Job summary: progress, Classifier usage and cost (estimated), extraction, failures
     by reason and flags. `live` adds what only a running runner knows (the effective rate)."""
@@ -387,11 +437,15 @@ def job_summary(
     manifest = load_manifest(ws, job_id)
     with ws.read_job(job_id) as store:
         states = store.states()
-        records = [
-            (doc_id, rec)
-            for doc_id in store.find_documents()
-            if (rec := store.get_record(doc_id, include_text=False)) is not None
-        ]
+        for _ in states:
+            if tick is not None:
+                tick()
+        records = []
+        for doc_id in store.find_documents():
+            if tick is not None:
+                tick()
+            if (rec := store.get_record(doc_id, include_text=False)) is not None:
+                records.append((doc_id, rec))
     by_state = Counter(states.values())
     finished = sum(by_state[s] for s in ("done", "failed", "cancelled"))
     end = info.finished_at if info.finished_at is not None else now
@@ -456,10 +510,13 @@ def finalize_job(
     cancel_reason: CancelReason | None = None,
     live: Mapping[str, Any] | None = None,
     error: str | None = None,
+    tick: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """End a Job: freeze `summary.json`, record the terminal state, and drop requests that were
     waiting on it, so none outlives its Job."""
-    summary = job_summary(ws, job_id, live=live, cancel_reason=cancel_reason, error=error)
+    summary = job_summary(
+        ws, job_id, live=live, cancel_reason=cancel_reason, error=error, tick=tick
+    )
     summary["state"] = state
     ws.finish_job(job_id, state, summary)
     discard_requests(ws, job_id, "cancel")

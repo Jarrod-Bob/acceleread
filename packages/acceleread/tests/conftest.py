@@ -98,8 +98,12 @@ class FakeClock:
 
     def __init__(self, start: float = 1_000_000.0) -> None:
         self.t = start
+        self.fail_once: Exception | None = None  # raised by the next reading, then cleared
 
     def now(self) -> float:
+        if self.fail_once is not None:
+            error, self.fail_once = self.fail_once, None
+            raise error
         return self.t
 
     def advance(self, seconds: float) -> None:
