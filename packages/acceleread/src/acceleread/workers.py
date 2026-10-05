@@ -117,6 +117,8 @@ class ExtractTask:
     path: Path
     format: Literal["pdf", "html"]
     ocr_languages: tuple[str, ...] = ("en",)
+    tessdata: tuple[Path, ...] = ()
+    """Extra Tesseract pack directories (the Workspace's), searched after the vendored one."""
 
     def for_pool(self) -> tuple[str, "ExtractTask"]:
         return "acceleread.workers:extract_document", self
@@ -124,11 +126,16 @@ class ExtractTask:
 
 def extract_document(task: ExtractTask, report: PageCountsCallback) -> Any:
     """Default handler, run inside a worker: Extract one Document."""
-    from acceleread.extract import extract_html, extract_pdf
+    from acceleread.extract import VENDORED_TESSDATA, extract_html, extract_pdf
 
     if task.format == "html":
         return extract_html(task.path)
-    return extract_pdf(task.path, ocr_languages=task.ocr_languages, on_page_counts=report)
+    return extract_pdf(
+        task.path,
+        ocr_languages=task.ocr_languages,
+        tessdata=[VENDORED_TESSDATA, *task.tessdata],
+        on_page_counts=report,
+    )
 
 
 def _load_handler(spec: str) -> Handler:

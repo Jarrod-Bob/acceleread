@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from acceleread.classifier import Capabilities
 from acceleread.jev import JEV_CAPABILITIES
+from acceleread.languages import RAPIDOCR_CODES, TESSERACT_CODES
 from acceleread.models import (
     CANONICAL_SECTION_KEYS,
     OTHER,
@@ -32,39 +33,9 @@ from acceleread.models import (
 
 TAXONOMY_BUDGET_WARNING_SHARE = 0.20
 
-# ISO 639-1 → Tesseract code (spec §4.3). A language outside this table is unknown.
-TESSERACT_CODES = {
-    "en": "eng",
-    "de": "deu",
-    "fr": "fra",
-    "es": "spa",
-    "it": "ita",
-    "pt": "por",
-    "nl": "nld",
-    "pl": "pol",
-    "sv": "swe",
-    "da": "dan",
-    "no": "nor",
-    "fi": "fin",
-    "cs": "ces",
-    "tr": "tur",
-    "ru": "rus",
-    "uk": "ukr",
-    "el": "ell",
-    "ar": "ara",
-    "he": "heb",
-    "hi": "hin",
-    "ja": "jpn",
-    "ko": "kor",
-    "zh": "chi_sim",
-}
 # The core package vendors only `eng.traineddata` (spec §2). The Docker image adds more, and
 # `acceleread ocr add-language` installs the rest into the Workspace; callers pass what they have.
 VENDORED_OCR_LANGUAGES = frozenset({"en"})
-# The `quality` Profile's RapidOCR model family is PP-OCR `latin`. It needs no Tesseract pack.
-RAPIDOCR_LANGUAGES = frozenset(
-    {"en", "de", "fr", "es", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "cs", "tr"}
-)
 
 
 @dataclass(frozen=True)
@@ -161,7 +132,7 @@ def _check_ocr_language(
     elif language not in TESSERACT_CODES:
         fail(f"unknown language '{language}'{_hint(language, TESSERACT_CODES)}")
     elif profile == "quality":
-        if language not in RAPIDOCR_LANGUAGES:
+        if language not in RAPIDOCR_CODES:
             fail(f"the quality Profile can't serve '{language}' (PP-OCR latin family only)")
     elif language not in installed:
         fail(
