@@ -91,7 +91,7 @@ def test_cli_run_writes_jsonl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert json.loads(line)["classification"]["value"] == "energy"
 
 
-async def test_classifier_error_yields_partial_record() -> None:
+async def test_a_classifier_422_cancels_the_job_and_the_record_keeps_its_text() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(422, json={"error": {"message": "bad question"}})
 
@@ -102,9 +102,10 @@ async def test_classifier_error_yields_partial_record() -> None:
     )
     spec = JobSpec(inputs=[SAMPLE], taxonomy=Taxonomy.from_file(TAXONOMY))
     (record,) = [r async for r in run(spec, JevClassifier(client=client))]
-    assert record.status == "partial"
+    assert record.status == "cancelled"  # a 422 auto-cancels the Job (spec §7.5)
     assert record.text and record.classification is None
     assert record.errors[0].stage == "classify"
+    assert record.errors[0].code == "classifier_rejected"
 
 
 async def test_unreadable_file_yields_failed_record(tmp_path: Path) -> None:

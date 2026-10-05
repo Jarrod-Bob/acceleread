@@ -24,13 +24,16 @@ def test_run_accepts_the_worker_flags(monkeypatch: pytest.MonkeyPatch, tmp_path:
     seen: list[WorkerSettings | None] = []
 
     async def fake_run(
-        spec: JobSpec, classifier: object = None, workers: WorkerSettings | None = None
+        spec: JobSpec,
+        classifier: object = None,
+        workers: WorkerSettings | None = None,
+        workspace: object = None,
     ):  # type: ignore[no-untyped-def]
         seen.append(workers)
         return
         yield
 
-    monkeypatch.setattr("acceleread.cli.run", fake_run)
+    monkeypatch.setattr("acceleread.jobcli.run", fake_run)
     monkeypatch.setattr("acceleread.cli.make_classifier", lambda model: idle_classifier())
     out = tmp_path / "out.jsonl"
     args = ["run", str(FIXTURES / "sample.pdf"), "--taxonomy", str(FIXTURES / "taxonomy.yaml")]

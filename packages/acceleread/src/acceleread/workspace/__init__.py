@@ -140,6 +140,10 @@ class Workspace:
         """The oldest queued Job (FIFO)."""
         return self._catalog.next_queued()
 
+    def claim_job(self, job_id: str) -> bool:
+        """Start a queued Job. False if it is no longer queued (a cancel got there first)."""
+        return self._catalog.claim(job_id)
+
     def set_job_state(self, job_id: str, state: JobState) -> None:
         self._catalog.set_state(job_id, state)
 

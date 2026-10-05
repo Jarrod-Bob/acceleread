@@ -90,6 +90,13 @@ class Catalog:
         if cursor.rowcount == 0:
             raise KeyError(job_id)
 
+    def claim(self, job_id: str) -> bool:
+        """queued -> running only if still queued, so a cancel and a start can't both win."""
+        cursor = self._db.execute(
+            "UPDATE jobs SET state='running' WHERE id=? AND state='queued'", (job_id,)
+        )
+        return cursor.rowcount == 1
+
     def now(self) -> float:
         return self._clock()
 

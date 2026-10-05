@@ -177,7 +177,7 @@ def test_per_document_overrides_are_validated_with_their_own_profile() -> None:
     assert codes(validate(stray).errors) == ["unknown_override"]
 
 
-def test_estimates_are_stubbed_for_now() -> None:
+def test_there_is_no_estimate_when_no_input_can_be_read() -> None:
     estimate = validate(spec(taxonomy=taxonomy("a"))).estimate
     assert estimate.documents == 1
     assert estimate.cost_usd is None and estimate.duration_seconds is None
