@@ -6,6 +6,7 @@ The one table mapping a Job's `ocr_languages` to Tesseract packs and RapidOCR mo
 """
 
 import os
+import tempfile
 import urllib.request
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -51,12 +52,14 @@ class LanguagePackError(Exception):
     """A language pack can't be installed."""
 
 
-def tesseract_code(language: str) -> str:
-    return TESSERACT_CODES[language]
+def offline() -> bool:
+    """`ACCELEREAD_OFFLINE=1`: any runtime download is an error (spec §2)."""
+    return os.environ.get("ACCELEREAD_OFFLINE") == "1"
 
 
-def rapidocr_code(language: str) -> str | None:
-    return RAPIDOCR_CODES.get(language)
+def pack_file(tessdata: Path, language: str) -> Path:
+    """Where a language's Tesseract pack lives in `tessdata` (an ISO 639-1 code)."""
+    return tessdata / f"{TESSERACT_CODES[language]}.traineddata"
 
 
 def workspace_tessdata(workspace: Path) -> Path:
@@ -66,17 +69,26 @@ def workspace_tessdata(workspace: Path) -> Path:
 def installed_languages(tessdata_dirs: Iterable[Path]) -> set[str]:
     """ISO codes whose Tesseract pack is in any of the directories."""
     dirs = list(tessdata_dirs)
-    return {
-        code
-        for code, pack in TESSERACT_CODES.items()
-        if any((d / f"{pack}.traineddata").is_file() for d in dirs)
-    }
+    return {code for code in TESSERACT_CODES if any(pack_file(d, code).is_file() for d in dirs)}
 
 
 def _download(pack: str) -> bytes:
     with urllib.request.urlopen(TESSDATA_FAST_URL.format(pack=pack), timeout=60) as response:
         data: bytes = response.read()
     return data
+
+
+def _loads(language: str, data: bytes) -> bool:
+    """Whether Tesseract can load `data` as the language's pack."""
+    import tesserocr
+
+    with tempfile.TemporaryDirectory(prefix="acceleread-pack-") as scratch:
+        pack_file(Path(scratch), language).write_bytes(data)
+        try:
+            tesserocr.PyTessBaseAPI(path=scratch, lang=TESSERACT_CODES[language]).End()
+        except RuntimeError:
+            return False
+    return True
 
 
 def add_language(
@@ -91,7 +103,7 @@ def add_language(
             data = from_file.read_bytes()
         except OSError as err:
             raise LanguagePackError(f"could not read {from_file}: {err}") from err
-    elif os.environ.get("ACCELEREAD_OFFLINE") == "1":
+    elif offline():
         raise LanguagePackError(
             f"ACCELEREAD_OFFLINE=1 forbids downloading '{pack}'; use --from-file"
         )
@@ -102,9 +114,14 @@ def add_language(
             raise LanguagePackError(f"could not download '{pack}': {err}") from err
     if not data:
         raise LanguagePackError(f"the '{pack}' pack is empty")
+    if not _loads(language, data):
+        raise LanguagePackError(f"the '{pack}' data is not a valid Tesseract pack")
     tessdata.mkdir(parents=True, exist_ok=True)
-    target = tessdata / f"{pack}.traineddata"
+    target = pack_file(tessdata, language)
     partial = target.with_suffix(".partial")
-    partial.write_bytes(data)
-    partial.replace(target)
+    try:
+        partial.write_bytes(data)
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
     return target

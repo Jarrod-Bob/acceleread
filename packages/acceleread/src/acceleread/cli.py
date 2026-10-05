@@ -91,15 +91,16 @@ def _housekeeping(args: argparse.Namespace) -> int:
     return 0
 
 
-def _setup(args: argparse.Namespace) -> int:
-    """`ocr add-language` and `doctor`. They touch `models/` only, so no Workspace is opened."""
-    workspace = resolve_workspace_path(args.workspace)
-    if args.command == "doctor":
-        checks = run_checks(workspace)
-        print(report(checks))
-        return 1 if any(c.status == "error" for c in checks) else 0
+def _doctor(args: argparse.Namespace) -> int:
+    checks = run_checks(resolve_workspace_path(args.workspace))
+    print(report(checks))
+    return 1 if any(c.status == "error" for c in checks) else 0
+
+
+def _add_language(args: argparse.Namespace) -> int:
+    tessdata = workspace_tessdata(resolve_workspace_path(args.workspace))
     try:
-        path = add_language(args.language, workspace_tessdata(workspace), from_file=args.from_file)
+        path = add_language(args.language, tessdata, from_file=args.from_file)
     except LanguagePackError as err:
         print(f"acceleread: {err}", file=sys.stderr)
         return 1
@@ -158,8 +159,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command in ("jobs", "cache"):
         return _housekeeping(args)
-    if args.command in ("ocr", "doctor"):
-        return _setup(args)
+    if args.command == "ocr":
+        return _add_language(args)
+    if args.command == "doctor":
+        return _doctor(args)
     if args.command != "run":
         parser.print_help()
         return 0

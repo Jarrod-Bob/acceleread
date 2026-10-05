@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """PDF and HTML Extraction: the OCR rule applied per Page, Tesseract, per-Page provenance."""
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -143,3 +144,22 @@ def test_packs_from_several_tessdata_directories_serve_one_page_and_are_recorded
     (page,) = doc.pages
     assert page.ocr_languages == ["en", "de"]
     assert "polysilicon" in doc.text
+
+
+def test_ocr_languages_are_iso_codes_not_tesseract_pack_names() -> None:
+    with pytest.raises(OcrLanguageUnavailable, match="eng"):
+        extract_pdf(FIXTURES / "scanned.pdf", ocr_languages=["eng"])
+
+
+def test_a_failed_engine_start_leaves_no_temp_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = tmp_path / "tessdata"
+    broken.mkdir()
+    (broken / "eng.traineddata").write_bytes(b"not a pack")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    with pytest.raises(RuntimeError):
+        extract_pdf(FIXTURES / "scanned.pdf", tessdata=[broken])
+    assert list(scratch.iterdir()) == []

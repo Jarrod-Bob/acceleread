@@ -7,19 +7,18 @@ vendored English pack) fails.
 """
 
 import importlib.util
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from acceleread.extract import VENDORED_TESSDATA
-from acceleread.languages import installed_languages, workspace_tessdata
+from acceleread.extract import VENDORED_TESSDATA, tesseract_version
+from acceleread.languages import installed_languages, offline, workspace_tessdata
 
 Status = Literal["ok", "absent", "error"]
-# Docling and PP-OCR weights land in the Workspace's `models/` (spec §2). The `quality` Profile
-# ticket owns their layout; until then these are the directories `models fetch` is expected to fill.
+# PROVISIONAL (#40, the `quality` Profile, owns the real layout): the Workspace `models/`
+# subdirectories and import names probed for Docling, PP-OCR and the `[quality]` extra.
 MODEL_DIRS = {"Docling weights": "docling", "PP-OCR weights": "ppocr"}
-EXTRAS = {"quality": ("docling", "rapidocr"), "edgar": ("edgar",)}
+EXTRAS = {"quality": ("docling", "rapidocr"), "llm": ("anthropic",), "edgar": ("edgar",)}
 
 
 @dataclass(frozen=True)
@@ -31,16 +30,13 @@ class Check:
 
 def _tesseract() -> Check:
     try:
-        import tesserocr
-
-        version = tesserocr.tesseract_version().splitlines()[0].removeprefix("tesseract ")
+        return Check("tesseract", "ok", tesseract_version())
     except Exception as err:
         return Check("tesseract", "error", f"unavailable: {err}")
-    return Check("tesseract", "ok", version)
 
 
-def _packs(workspace: Path) -> list[Check]:
-    vendored = installed_languages([VENDORED_TESSDATA])
+def _packs(workspace: Path, vendored_dir: Path) -> list[Check]:
+    vendored = installed_languages([vendored_dir])
     extra = installed_languages([workspace_tessdata(workspace)]) - vendored
     if "en" in vendored:
         core = Check("language packs (vendored)", "ok", ", ".join(sorted(vendored)))
@@ -70,15 +66,14 @@ def _extras() -> list[Check]:
     return checks
 
 
-def run_checks(workspace: Path) -> list[Check]:
-    offline = os.environ.get("ACCELEREAD_OFFLINE") == "1"
+def run_checks(workspace: Path, vendored: Path = VENDORED_TESSDATA) -> list[Check]:
     return [
         Check("workspace", "ok" if workspace.is_dir() else "absent", str(workspace)),
         _tesseract(),
-        *_packs(workspace),
+        *_packs(workspace, vendored),
         *_models(workspace),
         *_extras(),
-        Check("offline mode", "ok", "on (ACCELEREAD_OFFLINE=1)" if offline else "off"),
+        Check("offline mode", "ok", "on (ACCELEREAD_OFFLINE=1)" if offline() else "off"),
     ]
 
 

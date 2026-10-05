@@ -10,6 +10,7 @@ import re
 import tempfile
 import time
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -19,7 +20,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_raw
 from lxml import html
 
-from acceleread.languages import TESSERACT_CODES
+from acceleread.languages import TESSERACT_CODES, pack_file
 from acceleread.models import Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
 
@@ -74,18 +75,22 @@ def path_count(page: Any) -> int:
     return sum(1 for _ in page.get_objects(filter=[pdfium_raw.FPDF_PAGEOBJ_PATH]))
 
 
+def tesseract_version() -> str:
+    import tesserocr
+
+    return tesserocr.tesseract_version().splitlines()[0].removeprefix("tesseract ")
+
+
 def _tesseract_packs(languages: Sequence[str], tessdata: Sequence[Path]) -> dict[str, Path]:
     """Each requested language's pack file, found in the first directory that has it."""
     packs: dict[str, Path] = {}
     for code in languages:
-        pack = TESSERACT_CODES.get(code, code)
-        found = next(
-            (d / f"{pack}.traineddata" for d in tessdata if (d / f"{pack}.traineddata").is_file()),
-            None,
-        )
+        if code not in TESSERACT_CODES:
+            raise OcrLanguageUnavailable(f"Unknown OCR language {code!r}: use an ISO 639-1 code")
+        found = next((p for p in (pack_file(d, code) for d in tessdata) if p.is_file()), None)
         if found is None:
             raise OcrLanguageUnavailable(f"No Tesseract language pack installed for {code!r}")
-        packs[pack] = found
+        packs[TESSERACT_CODES[code]] = found
     return packs
 
 
@@ -96,17 +101,17 @@ class TesseractOcr:
         import tesserocr
 
         packs = _tesseract_packs(languages, tessdata)
-        # Tesseract reads one directory, so packs from the vendored and Workspace directories are
-        # linked together.
-        self._links = tempfile.TemporaryDirectory(prefix="acceleread-tessdata-")
-        for pack, source in packs.items():
-            (Path(self._links.name) / f"{pack}.traineddata").symlink_to(source)
-        self._api = tesserocr.PyTessBaseAPI(
-            path=self._links.name,
-            lang="+".join(packs),
-            psm=tesserocr.PSM.AUTO,
-        )
-        self.version = tesserocr.tesseract_version().splitlines()[0].removeprefix("tesseract ")
+        with ExitStack() as stack:
+            # Tesseract reads one directory, so packs from the vendored and Workspace directories
+            # are linked together.
+            links = stack.enter_context(tempfile.TemporaryDirectory(prefix="acceleread-tessdata-"))
+            for pack, source in packs.items():
+                (Path(links) / f"{pack}.traineddata").symlink_to(source)
+            api = tesserocr.PyTessBaseAPI(path=links, lang="+".join(packs), psm=tesserocr.PSM.AUTO)
+            stack.callback(api.End)  # runs before the directory goes
+            self._api = api
+            self.version = tesseract_version()
+            self._cleanup = stack.pop_all()
 
     def recognise(self, page: Any) -> tuple[str, float | None]:
         bitmap = page.render(scale=OCR_DPI / 72, grayscale=True)
@@ -118,15 +123,14 @@ class TesseractOcr:
         return text, (confidence / 100 if text else None)
 
     def close(self) -> None:
-        self._api.End()
-        self._links.cleanup()
+        self._cleanup.close()
 
 
 def extract_pdf(
     path: Path,
     ocr_languages: Sequence[str] = ("en",),
     step3: Step3Hook | None = None,
-    tessdata: Path | Sequence[Path] = VENDORED_TESSDATA,
+    tessdata: Sequence[Path] = (VENDORED_TESSDATA,),
     on_page_counts: PageCountsCallback | None = None,
 ) -> Extracted:
     """Concatenate each Page's text, from the text layer or OCR as the OCR rule decides.
