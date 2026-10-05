@@ -8,9 +8,10 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import anthropic
 import httpx2
 import pytest
+
+anthropic = pytest.importorskip("anthropic")  # the [llm] extra; CI has a leg for it
 
 from acceleread.classifier import (
     Choice,
@@ -98,10 +99,9 @@ async def test_one_call_asks_every_judgment_with_structured_output_at_low_effort
     body = json.loads(request.content)
     assert body["model"] == "claude-opus-5-5"
     assert body["output_config"]["effort"] == "low"
-    assert "thinking" not in body  # Opus 5.5 cannot disable thinking
     schema = body["output_config"]["format"]["schema"]
     assert body["output_config"]["format"]["type"] == "json_schema"
-    assert schema["required"] == sorted(JUDGMENTS) or set(schema["required"]) == set(JUDGMENTS)
+    assert set(schema["required"]) == set(JUDGMENTS)
     assert schema["additionalProperties"] is False
     props = schema["properties"]
     assert props["q_going_concern"]["type"] == "boolean"
@@ -167,6 +167,11 @@ async def test_a_refusal_is_an_error_not_an_answer() -> None:
         (500, "api_error", ClassifierUnavailable),
         (503, "api_error", ClassifierUnavailable),
         (422, "invalid_request_error", ClassifierRejected),
+        (401, "authentication_error", ClassifierRejected),
+        (403, "permission_error", ClassifierRejected),
+        (404, "not_found_error", ClassifierRejected),
+        (400, "invalid_request_error", ClassifierRejected),
+        (413, "request_too_large", ClassifierTokensExceeded),
     ],
 )
 async def test_http_failures_map_to_seam_errors(
@@ -179,15 +184,15 @@ async def test_http_failures_map_to_seam_errors(
     assert len(calls) == 1  # the SDK never retries underneath the rate limiter
 
 
+async def test_an_unknown_error_body_is_still_a_seam_error() -> None:
+    handler = replying({"unexpected": True}, status=418)
+    with pytest.raises(ClassifierRejected):
+        await claude(handler).judge(STATE, JUDGMENTS)
+
+
 async def test_a_prompt_over_the_token_limit_is_tokens_exceeded() -> None:
     body = error_body("invalid_request_error", "prompt is too long: 1100000 tokens > 1000000")
     with pytest.raises(ClassifierTokensExceeded):
-        await claude(replying(body, status=400)).judge(STATE, JUDGMENTS)
-
-
-async def test_any_other_bad_request_propagates() -> None:
-    body = error_body("invalid_request_error", "messages: field required")
-    with pytest.raises(anthropic.BadRequestError):
         await claude(replying(body, status=400)).judge(STATE, JUDGMENTS)
 
 
@@ -226,6 +231,11 @@ def test_the_ceiling_is_80_percent_of_the_published_per_minute_limits() -> None:
     assert limit.requests_per_s == pytest.approx(1000 / 60 * 0.8)
 
 
+def test_the_combined_tokens_limit_is_not_mistaken_for_input_tokens() -> None:
+    headers = {k: v for k, v in RATE_HEADERS.items() if "input-tokens" not in k}
+    assert claude_rate_limit(headers) is None
+
+
 def test_without_the_headers_there_is_no_ceiling() -> None:
     assert claude_rate_limit({}) is None
     assert claude_rate_limit({"anthropic-ratelimit-requests-limit": "x"}) is None
@@ -253,6 +263,17 @@ async def test_the_limiter_adopts_the_ceiling_the_headers_announce() -> None:
     assert limiter.ceiling.tokens_per_s == pytest.approx(2_000_000 / 60 * 0.8)
 
 
+async def test_a_user_set_rate_limit_is_never_raised_by_the_headers() -> None:
+    mine = RateLimit(tokens_per_s=100, requests_per_s=1)
+    inner = claude(replying(message(ANSWERS), headers=RATE_HEADERS))
+    limiter = RateLimitedClassifier(inner, mine, user_set=True)
+    inner.on_rate_limit = limiter.update_ceiling
+    await limiter.judge(STATE, JUDGMENTS)
+    assert limiter.ceiling == mine
+    limiter.update_ceiling(RateLimit(tokens_per_s=10, requests_per_s=5))
+    assert limiter.ceiling == RateLimit(tokens_per_s=10, requests_per_s=1)  # lower is honoured
+
+
 async def test_a_flagged_judgment_escalates_through_the_planner_and_this_classifier() -> None:
     body = message({"q_going_concern": True, "taxonomy": "tech"})
     seen: list[httpx2.Request] = []
@@ -271,14 +292,14 @@ async def test_a_flagged_judgment_escalates_through_the_planner_and_this_classif
         coverage=Coverage(est_tokens=5),
     )
     outcome = Outcome(answers={"going_concern": first})
-    errors = await escalate(
+    await escalate(
         view,
         specs,
         outcome,
         classifier=claude(replying(body, seen)),
         budget=EscalationBudget(total_documents=100, escalation_max=1.0),
     )
-    assert errors == []
+    assert outcome.errors == []
     done = outcome.answers["going_concern"]
     assert isinstance(done, Judgment)
     assert (done.escalation.status, done.value, done.confidence) == ("escalated", 1.0, None)

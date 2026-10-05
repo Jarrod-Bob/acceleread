@@ -2,6 +2,7 @@
 """Escalation: flagging below `escalate_below`, and re-asking an LLM (docs/spec/v0.md §5.5)."""
 
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from acceleread.models import (
     Taxonomy,
 )
 from acceleread.planner import DocumentView, Outcome, judgment_specs
+from acceleread.workspace import Workspace
 
 JEV_INFO = ClassifierInfo(id="jev", model="jev-1.13.0", version="1")
 LLM_INFO = ClassifierInfo(id="claude", model="claude-opus-5-5", version="1")
@@ -142,10 +144,10 @@ async def test_the_jobs_escalate_below_applies_where_a_question_sets_none() -> N
 async def test_the_llm_re_reads_flagged_judgments_and_its_result_is_the_record() -> None:
     specs = judgment_specs(TAXONOMY, [question("a", escalate_below=0.6, reads=["risk_factors"])])
     outcome = outcome_with(first_pass(0.4), a=first_pass(0.4, value=0.0))
-    errors = await escalate(
+    await escalate(
         VIEW, specs, outcome, classifier=FakeLLM(), budget=EscalationBudget(total_documents=100)
     )
-    assert errors == []
+    assert outcome.errors == []
     escalated = answer(outcome, "a")
     assert (escalated.value, escalated.probabilities, escalated.confidence) == (1.0, None, None)
     assert escalated.classifier == LLM_INFO
@@ -251,7 +253,7 @@ async def test_nothing_flagged_costs_no_slot_and_no_call() -> None:
 async def test_a_failed_escalation_keeps_the_first_pass_and_says_so() -> None:
     specs = judgment_specs(TAXONOMY, [question("a", escalate_below=0.9)])
     outcome = outcome_with(None, a=first_pass(0.1, value=0.0))
-    errors = await escalate(
+    await escalate(
         VIEW,
         specs,
         outcome,
@@ -262,7 +264,32 @@ async def test_a_failed_escalation_keeps_the_first_pass_and_says_so() -> None:
     assert (kept.value, kept.confidence, kept.classifier) == (0.0, 0.1, JEV_INFO)
     assert kept.escalation.status == "failed"
     assert "ClassifierThrottled" in (kept.escalation.reason or "")
-    assert [(e.stage, e.code) for e in errors] == [("escalate", "ClassifierThrottled")]
+    assert [(e.stage, e.code) for e in outcome.errors] == [("escalate", "ClassifierThrottled")]
+
+
+async def test_a_failed_escalation_still_uses_its_slot() -> None:
+    specs = judgment_specs(TAXONOMY, [question("a", escalate_below=0.9)])
+    outcome = outcome_with(None, a=first_pass(0.1))
+    budget = EscalationBudget(1000, escalation_max=1.0)
+    await escalate(
+        VIEW, specs, outcome, classifier=FakeLLM(error=ClassifierThrottled()), budget=budget
+    )
+    assert budget.escalated == 1
+
+
+async def test_a_slot_is_not_spent_when_the_cache_answers_every_escalated_judgment(
+    tmp_path: Path,
+) -> None:
+    specs = judgment_specs(TAXONOMY, [question("a", escalate_below=0.9)])
+    budget = EscalationBudget(1000, escalation_max=1.0)
+    with Workspace.open(tmp_path / "ws", filesystem_type=lambda _p: "apfs") as ws:
+        for _ in range(2):  # the second run is served from the Judgment cache
+            outcome = outcome_with(None, a=first_pass(0.1))
+            await escalate(
+                VIEW, specs, outcome, classifier=FakeLLM(), budget=budget, cache=ws.cache
+            )
+            assert answer(outcome, "a").escalation.status == "escalated"
+    assert budget.escalated == 1
 
 
 async def test_flagged_judgments_stay_flagged_when_no_llm_is_configured() -> None:

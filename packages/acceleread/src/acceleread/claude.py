@@ -46,6 +46,8 @@ CLAUDE_CAPABILITIES = Capabilities(
 type Effort = Literal["low", "medium", "high", "xhigh", "max"]
 EFFORT: Effort = "low"
 MAX_TOKENS = 16_000  # thinking at low effort plus a few short answers; non-streaming safe
+# "fallbacks" here is the API's server-side refusal fallback (another model answers a request the
+# first declined), not acceleread's Fallback: head+tail reads, or Escalation (see CONTEXT.md).
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 SYSTEM_PROMPT = (
     "You answer questions about a document. The document is the JSON under `document`. "
@@ -69,9 +71,8 @@ def claude_rate_limit(headers: Mapping[str, str]) -> RateLimit | None:
     The headers give per-minute limits. None when they are absent or unreadable.
     """
     requests = _int_header(headers, "anthropic-ratelimit-requests-limit")
-    tokens = _int_header(headers, "anthropic-ratelimit-input-tokens-limit") or _int_header(
-        headers, "anthropic-ratelimit-tokens-limit"
-    )
+    # Input tokens only: the combined `tokens-limit` also counts output, so it is no substitute.
+    tokens = _int_header(headers, "anthropic-ratelimit-input-tokens-limit")
     if requests is None or tokens is None:
         return None
     return RateLimit(
@@ -182,10 +183,7 @@ class ClaudeClassifier:
             raise ClassifierTransient("classifier connection failed or timed out") from error
         except anthropic.APIStatusError as error:
             self._observe(error.response.headers)
-            translated = _translate(error)
-            if translated is None:
-                raise
-            raise translated from error
+            raise _translate(error) from error
         self._observe(raw.headers)
         response = await raw.parse()
         usage = response.usage
@@ -209,15 +207,33 @@ def _retry_after(error: anthropic.APIStatusError) -> float | None:
         return None
 
 
-def _translate(error: anthropic.APIStatusError) -> ClassifierError | None:
-    """Map an API failure to a seam error; None means it propagates unchanged."""
+def _error_type(error: anthropic.APIStatusError) -> str | None:
+    body = error.body
+    detail = body.get("error") if isinstance(body, dict) else None
+    kind = detail.get("type") if isinstance(detail, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def _translate(error: anthropic.APIStatusError) -> ClassifierError:
+    """Map every API failure to a seam error (docs/spec/v0.md §7.5).
+
+    Throttling and 5xx are retried by the limiter. A request too large for the model is
+    `ClassifierTokensExceeded`. Everything else (401, 403, 404, 422, other 400s) is a request or
+    setup the Classifier will never accept, so it is `ClassifierRejected` and cancels the Job.
+    """
     status = error.status_code
     if status in (429, 529):
         return ClassifierThrottled(_retry_after(error))
     if status >= 500:
         return ClassifierUnavailable(f"classifier returned {status}")
-    if status == 400 and _TOO_LONG in error.message.lower():
+    if status == 413 or _error_type(error) == "request_too_large":
+        return ClassifierTokensExceeded("state over the request size limit")
+    # The API has no distinct type for an over-long prompt: it is a plain 400
+    # `invalid_request_error` whose message says so, so only that one 400 is read by message.
+    if (
+        status == 400
+        and _error_type(error) == "invalid_request_error"
+        and _TOO_LONG in error.message.lower()
+    ):
         return ClassifierTokensExceeded("state over the token limit")
-    if status == 422:
-        return ClassifierRejected(f"classifier rejected the request ({status})")
-    return None
+    return ClassifierRejected(f"classifier rejected the request ({status})")

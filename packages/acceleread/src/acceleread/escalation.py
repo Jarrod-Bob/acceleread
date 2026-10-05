@@ -19,7 +19,6 @@ from acceleread.models import (
     Escalation,
     FirstPass,
     Judgment,
-    RecordError,
 )
 from acceleread.planner import DocumentView, JudgmentSpec, Outcome, judge_document
 from acceleread.workspace.cache import JudgmentCache
@@ -31,7 +30,9 @@ _EPSILON = 1e-9  # so 200 documents at 0.5% is exactly one, not 0.999…
 class EscalationBudget:
     """`escalation_max`: the share of a Job's Documents whose Judgments may go to the LLM.
 
-    A Document takes one slot however many of its Judgments escalate. The cap rounds down.
+    A Document takes one slot however many of its Judgments escalate, and a failed escalation
+    keeps its slot. A Document whose escalation was answered wholly from the Judgment cache gives
+    its slot back: it cost nothing. The cap rounds down.
     One budget is shared by every Document of a Job; `claim` never awaits, so concurrent
     Documents cannot overspend it.
     """
@@ -55,6 +56,16 @@ class EscalationBudget:
             return False
         self.escalated += 1
         return True
+
+    def release(self) -> None:
+        self.escalated = max(0, self.escalated - 1)
+
+
+@dataclass(frozen=True)
+class _Flagged:
+    spec: JudgmentSpec
+    first: Judgment
+    reason: str
 
 
 def _current(outcome: Outcome, spec: JudgmentSpec) -> Judgment | None:
@@ -87,58 +98,54 @@ async def escalate(
     classifier: Classifier | None,
     budget: EscalationBudget | None,
     cache: JudgmentCache | None = None,
-) -> list[RecordError]:
+) -> None:
     """Flag, and where allowed escalate, a Document's low-confidence Judgments in `outcome`.
 
-    `classifier` is the LLM; None means flag only. Returns the errors of a failed escalation
-    (stage `escalate`); the Judgments themselves keep their first-pass value, marked `failed`.
+    `classifier` is the LLM; None means flag only. A failed escalation leaves the first pass in
+    place, marked `failed`, and adds an `escalate`-stage error to `outcome.errors`.
     """
-    flagged: list[tuple[JudgmentSpec, Judgment, str]] = []
+    flagged: list[_Flagged] = []
     for spec in specs:
         judgment = _current(outcome, spec)
         if judgment is None or spec.escalate_below is None:
             continue
         reason = _flag_reason(judgment, spec.escalate_below)
         if reason is not None:
-            flagged.append((spec, judgment, reason))
+            flagged.append(_Flagged(spec, judgment, reason))
     if not flagged:
-        return []
+        return
 
-    note = ""
     if classifier is not None and (budget is None or budget.claim()):
-        return await _escalate(view, flagged, outcome, classifier, cache)
-    if classifier is not None:
-        note = "; not escalated: escalation_max reached"
-    for spec, judgment, reason in flagged:
-        _store(
-            outcome,
-            spec,
-            _with_escalation(judgment, Escalation(status="flagged", reason=reason + note)),
-        )
-    return []
+        await _escalate(view, flagged, outcome, classifier, budget, cache)
+        return
+    note = "; not escalated: escalation_max reached" if classifier is not None else ""
+    for item in flagged:
+        escalation = Escalation(status="flagged", reason=item.reason + note)
+        _store(outcome, item.spec, _with_escalation(item.first, escalation))
 
 
 async def _escalate(
     view: DocumentView,
-    flagged: list[tuple[JudgmentSpec, Judgment, str]],
+    flagged: list[_Flagged],
     outcome: Outcome,
     classifier: Classifier,
+    budget: EscalationBudget | None,
     cache: JudgmentCache | None,
-) -> list[RecordError]:
-    second = await judge_document(view, [spec for spec, _, _ in flagged], classifier, cache)
-    outcome.usage.requests += second.usage.requests
-    outcome.usage.input_tokens += second.usage.input_tokens
-    outcome.usage.output_tokens += second.usage.output_tokens
-    outcome.usage.cache_hits += second.usage.cache_hits
+) -> None:
+    second = await judge_document(view, [item.spec for item in flagged], classifier, cache)
+    outcome.usage.add(second.usage)
+    if budget is not None and second.usage.requests == 0 and not second.errors:
+        budget.release()  # every Judgment came from the cache
     why_not = "; ".join(sorted({e.code for e in second.errors})) or "no result"
-    for spec, first, reason in flagged:
-        result = _current(second, spec)
+    for item in flagged:
+        result = _current(second, item.spec)
         if result is None:
             escalation = Escalation(
-                status="failed", reason=f"{reason}; escalation failed: {why_not}"
+                status="failed", reason=f"{item.reason}; escalation failed: {why_not}"
             )
-            _store(outcome, spec, _with_escalation(first, escalation))
+            _store(outcome, item.spec, _with_escalation(item.first, escalation))
             continue
+        first = item.first
         kept = FirstPass(
             classifier=first.classifier,
             value=first.value,
@@ -146,9 +153,6 @@ async def _escalate(
             confidence=first.confidence,
             coverage=first.coverage,
         )
-        _store(
-            outcome,
-            spec,
-            _with_escalation(result, Escalation(status="escalated", reason=reason, first=kept)),
-        )
-    return [e.model_copy(update={"stage": "escalate"}) for e in second.errors]
+        escalation = Escalation(status="escalated", reason=item.reason, first=kept)
+        _store(outcome, item.spec, _with_escalation(result, escalation))
+    outcome.errors.extend(e.model_copy(update={"stage": "escalate"}) for e in second.errors)

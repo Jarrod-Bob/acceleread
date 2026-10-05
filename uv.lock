@@ -24,7 +24,6 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
-    { name = "anthropic", specifier = ">=0.40" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
@@ -97,7 +96,7 @@ quality = [
 [package.metadata]
 requires-dist = [
     { name = "acceleread", extras = ["quality", "llm", "edgar"], marker = "extra == 'all'", editable = "packages/acceleread" },
-    { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.40" },
+    { name = "anthropic", marker = "extra == 'llm'", specifier = ">=1.0" },
     { name = "docling-slim", extras = ["convert-core", "format-pdf", "feat-ocr-rapidocr-onnx", "models-local"], marker = "extra == 'quality'", specifier = ">=2.133" },
     { name = "edgartools", marker = "extra == 'edgar'", specifier = "==5.60.0" },
     { name = "fastapi", specifier = ">=0.115" },

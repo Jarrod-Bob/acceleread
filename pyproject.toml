@@ -9,7 +9,6 @@ acceleread-eval = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "anthropic>=0.40",  # the [llm] extra's SDK, so CI (no extras) tests the Claude Classifier
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=1.4.0",
@@ -25,6 +24,10 @@ extend-exclude = ["corpus"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# importorskip must precede the imports that need the optional [llm] extra
+"packages/acceleread/tests/test_claude_classifier.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["acceleread", "acceleread_eval"]
