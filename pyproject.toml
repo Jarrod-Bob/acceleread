@@ -38,7 +38,7 @@ module = ["pypdfium2", "pypdfium2.*"]  # ships no type information
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["lxml", "lxml.*", "psutil", "tesserocr"]  # no stubs or py.typed marker
+module = ["lxml", "lxml.*", "psutil", "tesserocr", "edgar", "edgar.*"]  # no stubs or py.typed marker; edgar is the optional [edgar] extra
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

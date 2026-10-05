@@ -142,3 +142,14 @@ def test_json_schema_is_generated_from_the_models() -> None:
     for field in ("external_id", "user_metadata", "metadata", "sections", "answers", "pages"):
         assert field in schema["properties"]
     assert schema["$defs"]["Page"]["properties"]["ocr_decision"]
+
+
+def test_a_span_cannot_end_before_it_starts() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from acceleread.models import Span
+
+    assert Span(start=3, end=3).end == 3
+    with pytest.raises(ValidationError):
+        Span(start=4, end=0)

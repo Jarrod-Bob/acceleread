@@ -234,6 +234,12 @@ class Span(BaseModel):
     start: int
     end: int
 
+    @model_validator(mode="after")
+    def _ordered(self) -> "Span":
+        if self.end < self.start:
+            raise ValueError("a span cannot end before it starts")
+        return self
+
 
 class Coverage(BaseModel):
     """The part of a Document a single Judgment read."""
