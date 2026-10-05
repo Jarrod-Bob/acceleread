@@ -3,7 +3,6 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -143,18 +142,19 @@ def test_filter_by_status_escalation_category_and_confidence(store: JobStore):
 
 
 def test_filter_by_answer_value(tmp_path: Path):
-    class WithAnswers(DocumentRecord):
-        answers: dict[str, Any] = {}  # noqa: RUF012  (Answers land with the models issue)
+    def with_answer(doc: str, value: str) -> DocumentRecord:
+        answer = Judgment(
+            kind="noul",
+            value=value,
+            classifier=ClassifierInfo(id="jev", model="jev-1", version="1"),
+            coverage=Coverage(est_tokens=10),
+        )
+        return make_record(doc).model_copy(update={"answers": {"has_going_concern": answer}})
 
-    base = make_record("a").model_dump()
     with JobStore.create(tmp_path / "j", job_id="j") as s:
         s.add_documents(["a", "b"])
-        s.save_record(
-            "a", "done", WithAnswers(**base, answers={"has_going_concern": {"value": "yes"}})
-        )
-        s.save_record(
-            "b", "done", WithAnswers(**base, answers={"has_going_concern": {"value": "no"}})
-        )
+        s.save_record("a", "done", with_answer("a", "yes"))
+        s.save_record("b", "done", with_answer("b", "no"))
         assert s.find_documents(answer=("has_going_concern", "yes")) == ["a"]
 
 
