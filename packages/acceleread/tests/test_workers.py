@@ -391,3 +391,19 @@ def test_worker_settings_default_to_one_thread_for_fast_and_four_for_quality() -
     finally:
         fast.close()
         quality.close()
+
+
+def test_extract_task_uses_language_packs_from_the_workspace(
+    make_pool: type[WorkerPool], tmp_path: Path
+) -> None:
+    from acceleread.extract import VENDORED_TESSDATA
+
+    tessdata = tmp_path / "tessdata"
+    tessdata.mkdir()
+    (tessdata / "deu.traineddata").write_bytes((VENDORED_TESSDATA / "eng.traineddata").read_bytes())
+    task = ExtractTask(
+        FIXTURES / "scanned.pdf", "pdf", ocr_languages=("en", "de"), tessdata=(tessdata,)
+    )
+    outcome = run(make_pool(), *task.for_pool())
+    assert isinstance(outcome.result, Extracted)
+    assert outcome.result.pages[0].ocr_languages == ["en", "de"]

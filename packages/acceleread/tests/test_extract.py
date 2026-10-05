@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from acceleread.extract import OcrLanguageUnavailable, extract_html, extract_pdf
+from acceleread.extract import (
+    VENDORED_TESSDATA,
+    OcrLanguageUnavailable,
+    extract_html,
+    extract_pdf,
+)
 from acceleread.ocr_rule import Step3Outcome
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -119,3 +124,22 @@ def test_html_decodes_non_utf8_bytes_using_its_declared_charset(tmp_path: Path) 
         b'<html><head><meta charset="iso-8859-1"></head><body><p>caf\xe9</p></body></html>'
     )
     assert extract_html(html).text.strip() == "café"
+
+
+def test_packs_from_several_tessdata_directories_serve_one_page_and_are_recorded(
+    tmp_path: Path,
+) -> None:
+    # A copy of the English pack stands in for a German one installed into the Workspace.
+    workspace_tessdata = tmp_path / "tessdata"
+    workspace_tessdata.mkdir()
+    (workspace_tessdata / "deu.traineddata").write_bytes(
+        (VENDORED_TESSDATA / "eng.traineddata").read_bytes()
+    )
+    doc = extract_pdf(
+        FIXTURES / "scanned.pdf",
+        ocr_languages=["en", "de"],
+        tessdata=[VENDORED_TESSDATA, workspace_tessdata],
+    )
+    (page,) = doc.pages
+    assert page.ocr_languages == ["en", "de"]
+    assert "polysilicon" in doc.text

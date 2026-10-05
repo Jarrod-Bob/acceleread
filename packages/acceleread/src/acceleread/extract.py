@@ -7,6 +7,7 @@ Pages it flags are rendered and recognised with Tesseract. Extraction never touc
 """
 
 import re
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_raw
 from lxml import html
 
+from acceleread.languages import TESSERACT_CODES
 from acceleread.models import Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
 
@@ -27,16 +29,6 @@ PageCountsCallback = Callable[[int, int], None]
 PAGE_SEPARATOR = "\n\n"
 OCR_DPI = 300
 VENDORED_TESSDATA = Path(__file__).parent / "tessdata"
-# ISO 639-1 (what a Job's `ocr_languages` holds) to Tesseract language packs (spec §4.3).
-TESSERACT_LANGUAGES = {
-    "en": "eng",
-    "de": "deu",
-    "fr": "fra",
-    "es": "spa",
-    "it": "ita",
-    "pt": "por",
-    "nl": "nld",
-}
 
 
 class OcrLanguageUnavailable(Exception):
@@ -82,25 +74,36 @@ def path_count(page: Any) -> int:
     return sum(1 for _ in page.get_objects(filter=[pdfium_raw.FPDF_PAGEOBJ_PATH]))
 
 
-def _tesseract_languages(languages: Sequence[str], tessdata: Path) -> str:
-    packs = []
+def _tesseract_packs(languages: Sequence[str], tessdata: Sequence[Path]) -> dict[str, Path]:
+    """Each requested language's pack file, found in the first directory that has it."""
+    packs: dict[str, Path] = {}
     for code in languages:
-        pack = TESSERACT_LANGUAGES.get(code, code)
-        if not (tessdata / f"{pack}.traineddata").exists():
+        pack = TESSERACT_CODES.get(code, code)
+        found = next(
+            (d / f"{pack}.traineddata" for d in tessdata if (d / f"{pack}.traineddata").is_file()),
+            None,
+        )
+        if found is None:
             raise OcrLanguageUnavailable(f"No Tesseract language pack installed for {code!r}")
-        packs.append(pack)
-    return "+".join(packs)
+        packs[pack] = found
+    return packs
 
 
 class TesseractOcr:
     """Tesseract through tesserocr on rendered Pages. Create lazily: importing loads the engine."""
 
-    def __init__(self, languages: Sequence[str], tessdata: Path) -> None:
+    def __init__(self, languages: Sequence[str], tessdata: Sequence[Path]) -> None:
         import tesserocr
 
+        packs = _tesseract_packs(languages, tessdata)
+        # Tesseract reads one directory, so packs from the vendored and Workspace directories are
+        # linked together.
+        self._links = tempfile.TemporaryDirectory(prefix="acceleread-tessdata-")
+        for pack, source in packs.items():
+            (Path(self._links.name) / f"{pack}.traineddata").symlink_to(source)
         self._api = tesserocr.PyTessBaseAPI(
-            path=str(tessdata),
-            lang=_tesseract_languages(languages, tessdata),
+            path=self._links.name,
+            lang="+".join(packs),
             psm=tesserocr.PSM.AUTO,
         )
         self.version = tesserocr.tesseract_version().splitlines()[0].removeprefix("tesseract ")
@@ -116,13 +119,14 @@ class TesseractOcr:
 
     def close(self) -> None:
         self._api.End()
+        self._links.cleanup()
 
 
 def extract_pdf(
     path: Path,
     ocr_languages: Sequence[str] = ("en",),
     step3: Step3Hook | None = None,
-    tessdata: Path = VENDORED_TESSDATA,
+    tessdata: Path | Sequence[Path] = VENDORED_TESSDATA,
     on_page_counts: PageCountsCallback | None = None,
 ) -> Extracted:
     """Concatenate each Page's text, from the text layer or OCR as the OCR rule decides.
@@ -165,7 +169,9 @@ def extract_pdf(
             text = layer
             if ocr_needed:
                 started = time.perf_counter()
-                ocr = ocr or TesseractOcr(languages, tessdata)
+                ocr = ocr or TesseractOcr(
+                    languages, [tessdata] if isinstance(tessdata, Path) else tessdata
+                )
                 page = pdf[record.number - 1]
                 text, confidence = ocr.recognise(page)
                 page.close()
