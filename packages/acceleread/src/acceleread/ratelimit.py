@@ -137,6 +137,20 @@ class RateLimitedClassifier:
         """True after 15 minutes without a success while requests are waiting or in flight."""
         return self._active > 0 and self._clock.now() - self._progress_at >= STALL_AFTER
 
+    def rate_summary(self) -> dict[str, dict[str, float]]:
+        """The effective rate now against the ceiling, for the Job summary."""
+        rate, ceiling = self.rate, self._ceiling
+        return {
+            "effective_rate": {
+                "tokens_per_s": rate.tokens_per_s,
+                "requests_per_s": rate.requests_per_s,
+            },
+            "ceiling": {
+                "tokens_per_s": ceiling.tokens_per_s,
+                "requests_per_s": ceiling.requests_per_s,
+            },
+        }
+
     def _current(self) -> RateLimit:
         c = self._ceiling
         return RateLimit(

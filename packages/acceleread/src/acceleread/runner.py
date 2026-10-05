@@ -4,42 +4,52 @@
 One runner per Workspace holds the runner lease and runs one Job at a time, FIFO. A Job goes
 queued -> extracting -> `extracted` (its Record, with Pages, Sections and text, persisted at once)
 -> classifying -> done or failed; a cancel ends with `cancelled`. Extraction stops while too many
-Documents await the Classifier. The Job-level policies live here: a spend cap and a Classifier
-422 or a worker crash rate auto-cancel the Job, and a lost lease stops it.
+Documents await the Classifier. The Job-level policies live here: a spend cap, a Classifier 422 or
+a worker crash rate auto-cancel the Job, and a lost lease stops it.
 
-Nothing here logs Document text or Classifier state.
+The holder is the single SQLite writer: other processes post requests (`jobcontrol`) that the
+holder applies. Nothing here logs Document text or Classifier state.
 """
 
 import asyncio
-import glob
+import logging
 import os
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from acceleread.classifier import Classifier
-from acceleread.config import Config, load_config
+from acceleread.config import load_config
 from acceleread.extract import VENDORED_TESSDATA
 from acceleread.jev import JEV_RATE_LIMIT, JevClassifier
 from acceleread.jobcontrol import (
-    cancel_marker,
+    AUTO_CANCEL_REASONS,
+    CancelReason,
+    add_spend,
+    apply_requests,
     finalize_job,
-    finish_cancelled,
+    job_spend,
     load_manifest,
-    read_cancel_request,
+    post_request,
     record_cost,
+    recover_orphans,
     sweep_unfinished,
+    touch_progress,
+    workspace_prices,
 )
 from acceleread.languages import installed_languages, workspace_tessdata
-from acceleread.models import DocumentRecord, JobSpec, ResolvedManifest
+from acceleread.models import DocumentRecord, JobSpec, ResolvedManifest, Usage
 from acceleread.pipeline import (
     ClassifyResult,
+    Extractor,
     classify_stage,
     document_format,
+    expand_inputs,
+    extract,
     extract_stage,
     failed,
     has_extraction,
@@ -48,7 +58,7 @@ from acceleread.pipeline import (
     new_record,
 )
 from acceleread.planner import JudgmentSpec
-from acceleread.ratelimit import MAX_IN_FLIGHT, RateLimit, RateLimitedClassifier
+from acceleread.ratelimit import RateLimit, RateLimitedClassifier
 from acceleread.validate import resolve
 from acceleread.workers import WorkerPool, WorkerSettings
 from acceleread.workspace import (
@@ -61,10 +71,14 @@ from acceleread.workspace import (
 )
 from acceleread.workspace.catalog import DEFAULT_LEASE_TTL, FINISHED_STATES
 
+logger = logging.getLogger(__name__)
+
 BACKPRESSURE_LIMIT = 500  # Documents allowed to await the Classifier (spec §7.3)
-POLL_INTERVAL = 0.5  # seconds between the monitor's checks (cancel marker, heartbeat, crash rate)
+POLL_INTERVAL = 0.5  # seconds between the monitor's checks (requests, heartbeat, crash rate)
+CANCEL_GRACE = 30.0  # seconds a cancelled Job waits for Classifier calls already in flight
 UNKNOWN_CLASSIFIER_CEILING = RateLimit(tokens_per_s=1e9, requests_per_s=1e6)
-_GLOB = ("*", "?", "[")
+
+type Sleep = Callable[[float], Awaitable[None]]
 
 
 class LeaseLostError(RuntimeError):
@@ -78,26 +92,6 @@ def default_ceiling(classifier: Classifier) -> RateLimit:
     return UNKNOWN_CLASSIFIER_CEILING
 
 
-def expand_inputs(spec: JobSpec) -> JobSpec:
-    """Replace each glob input with the files it matches, carrying its overrides along."""
-    inputs = []
-    overrides = dict(spec.overrides)
-    for document in spec.inputs:
-        source = document.source
-        if "://" in source or Path(source).exists() or not any(c in source for c in _GLOB):
-            inputs.append(document)
-            continue
-        matches = sorted(m for m in glob.glob(source, recursive=True) if Path(m).is_file())
-        if not matches:
-            inputs.append(document)  # reported when this Document fails to extract
-            continue
-        inputs += [document.model_copy(update={"source": m}) for m in matches]
-        if source in overrides:
-            override = overrides.pop(source)
-            overrides.update({m: override for m in matches})
-    return spec.model_copy(update={"inputs": inputs, "overrides": overrides})
-
-
 class Runner:
     def __init__(
         self,
@@ -105,15 +99,18 @@ class Runner:
         classifier: Classifier,
         *,
         workers: WorkerSettings | None = None,
-        config: Config | None = None,
         holder: str | None = None,
         backpressure: int = BACKPRESSURE_LIMIT,
-        classify_concurrency: int = MAX_IN_FLIGHT,
+        classify_concurrency: int | None = None,
         poll_interval: float = POLL_INTERVAL,
         lease_ttl: float = DEFAULT_LEASE_TTL,
+        cancel_grace: float = CANCEL_GRACE,
+        extractor: Extractor = extract,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         self.workspace = workspace
-        self.config = config if config is not None else load_config(workspace.path)
+        self.config = load_config(workspace.path)
         # One limiter per Classifier per runner (spec §7.5).
         self.classifier: RateLimitedClassifier = (
             classifier
@@ -125,9 +122,14 @@ class Runner:
         self.workers = workers
         self.holder = holder or f"runner-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.backpressure = backpressure
-        self.classify_concurrency = classify_concurrency
+        # Documents classified at once: the ceiling's `max_in_flight` unless a test says less.
+        self.classify_concurrency = classify_concurrency or self.classifier.ceiling.max_in_flight
         self.poll_interval = poll_interval
         self.lease_ttl = lease_ttl
+        self.cancel_grace = cancel_grace
+        self.extractor = extractor
+        self.clock = clock
+        self.sleep = sleep
         self.holds_lease = False
 
     # Submitting
@@ -158,10 +160,12 @@ class Runner:
     # The lease and the queue
 
     def acquire(self) -> bool:
-        """Take the runner lease, and once held, requeue Jobs a dead runner left `running`."""
+        """Take the runner lease. Once held, requeue Jobs a dead runner left `running` and apply
+        requests posted while there was no holder."""
         self.holds_lease = self.workspace.acquire_lease(self.holder, self.lease_ttl)
         if self.holds_lease:
-            self._recover()
+            recover_orphans(self.workspace)
+            apply_requests(self.workspace)
         return self.holds_lease
 
     def release(self) -> None:
@@ -169,16 +173,21 @@ class Runner:
             self.workspace.release_lease(self.holder)
             self.holds_lease = False
 
-    def _recover(self) -> None:
-        """We hold the lease, so no other runner is running a Job: a `running` Job is orphaned."""
-        ws = self.workspace
-        for job in ws.list_jobs(include_ingest=True):
-            if job.state != "running":
-                continue
-            if (reason := read_cancel_request(ws, job.id)) is not None:
-                finish_cancelled(ws, job.id, reason)
-            else:
-                ws.set_job_state(job.id, "queued")
+    def apply_requests(self) -> int:
+        """Apply cancel, resume and retry requests other processes posted (we are the writer)."""
+        return apply_requests(self.workspace)
+
+    async def _run_one(self, job_id: str) -> bool:
+        """Execute one Job. A Job that fails is logged and finalised `failed`, never fatal to the
+        runner. False means the lease was lost: stop, whoever holds it now recovers the Job."""
+        try:
+            await self.execute(job_id)
+        except LeaseLostError:
+            self.holds_lease = False
+            return False
+        except Exception as exc:  # `execute` has already finalised the Job as failed
+            logger.error("Job %s failed: %s", job_id, type(exc).__name__)
+        return True
 
     async def drain(self, until: str | None = None) -> None:
         """Run queued Jobs in FIFO order until the queue is empty, or `until` has been run."""
@@ -186,9 +195,9 @@ class Runner:
             raise LeaseLostError("another runner holds the lease")
         try:
             while (job_id := self.workspace.next_queued()) is not None:
-                await self.execute(job_id)
-                if job_id == until:
+                if not await self._run_one(job_id) or job_id == until:
                     return
+                self.apply_requests()
         finally:
             self.release()
 
@@ -197,41 +206,70 @@ class Runner:
 
         It holds the lease while idle too, so a `run` from another process joins its FIFO.
         """
-        self.acquire()
-        while not stop.is_set():
-            job_id = self.workspace.next_queued()
-            if job_id is not None and (self.holds_lease or self.acquire()):
-                await self.execute(job_id)
-                continue
-            if self.holds_lease:
-                self.holds_lease = self.workspace.heartbeat(self.holder)
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), self.poll_interval)
-        self.release()
+        ws = self.workspace
+        try:
+            while not stop.is_set():
+                if not self.holds_lease and not self.acquire():
+                    await self._idle(stop)
+                    continue
+                self.apply_requests()
+                job_id = ws.next_queued()
+                if job_id is not None:
+                    await self._run_one(job_id)
+                    continue
+                self.holds_lease = ws.heartbeat(self.holder)
+                await self._idle(stop)
+        finally:
+            self.release()
+
+    async def _idle(self, stop: asyncio.Event) -> None:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), self.poll_interval)
 
     # Executing
 
     async def execute(self, job_id: str) -> JobState:
         """Run one Job to a terminal state (done, failed or cancelled) and freeze its summary."""
         ws = self.workspace
-        manifest = load_manifest(ws, job_id)
-        store = ws.open_job(job_id)
-        ws.set_job_state(job_id, "running")
-        run = _JobRun(self, job_id, manifest, store)
+        if not ws.claim_job(job_id):  # a cancel may have got there first
+            return ws.get_job(job_id).state
+        manifest: ResolvedManifest | None = None
+        store: JobStore | None = None
         try:
-            return await run.run()
+            manifest = load_manifest(ws, job_id)
+            store = ws.open_job(job_id)
+            touch_progress(ws, job_id)
+            return await _JobRun(self, job_id, manifest, store).run()
         except LeaseLostError:
             raise  # the new holder requeues the Job and carries on
         except asyncio.CancelledError:
-            sweep_unfinished(ws, job_id, store, manifest)
-            finalize_job(ws, job_id, "cancelled", cancel_reason="user", prices=self.config.prices)
+            self._wind_up(job_id, manifest, store, "cancelled", cancel_reason="user")
             raise
-        except Exception:
-            sweep_unfinished(ws, job_id, store, manifest)
-            finalize_job(ws, job_id, "failed", prices=self.config.prices)
+        except Exception as exc:
+            self._wind_up(job_id, manifest, store, "failed", error=type(exc).__name__)
             raise
         finally:
-            store.close()
+            if store is not None:
+                store.close()
+
+    def _wind_up(
+        self,
+        job_id: str,
+        manifest: ResolvedManifest | None,
+        store: JobStore | None,
+        state: JobState,
+        *,
+        cancel_reason: CancelReason | None = None,
+        error: str | None = None,
+    ) -> None:
+        """End a Job that stopped abnormally, still giving every Document its Record."""
+        ws = self.workspace
+        try:
+            if manifest is not None and store is not None:
+                sweep_unfinished(ws, job_id, store, manifest)
+            finalize_job(ws, job_id, state, cancel_reason=cancel_reason, error=error)
+        except Exception:
+            ws.set_job_state(job_id, state)  # at least leave the catalog truthful
 
 
 class _JobRun:
@@ -247,8 +285,9 @@ class _JobRun:
         self.store = store
         self.specs: list[JudgmentSpec] = judgments_of(manifest)
         self.cache = self.ws.cache if manifest.cache else None
+        self.prices = workspace_prices(self.ws)
         self.stop = asyncio.Event()
-        self.cancel_reason: str | None = None
+        self.cancel_reason: CancelReason | None = None
         self.lease_lost = False
         self.spent = 0.0
         self.pool: WorkerPool | None = None
@@ -257,19 +296,16 @@ class _JobRun:
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.model = runner.classifier.capabilities.model
 
-    def trigger_cancel(self, reason: str) -> None:
+    def trigger_cancel(self, reason: CancelReason) -> None:
         if self.cancel_reason is None:
             self.cancel_reason = reason
         self.stop.set()
         if self.pool is not None:
             self.pool.cancel(reason)
 
-    def _cap(self) -> float | None:
-        """`max_cost_usd`, re-read each time because it may change while the Job runs."""
-        return load_manifest(self.ws, self.job_id).max_cost_usd
-
     def check_cap(self) -> None:
-        cap = self._cap()
+        """Re-read `max_cost_usd` each time: it may change while the Job runs."""
+        cap = load_manifest(self.ws, self.job_id).max_cost_usd
         if cap is not None and self.spent >= cap:
             self.trigger_cancel("spend_cap")
 
@@ -281,111 +317,127 @@ class _JobRun:
         todo = deque(
             d for d, s in self.store.states().items() if s in ("queued", "extracted", "classifying")
         )
-        self.spent = sum(
-            record_cost(rec, self.model, runner.config.prices)
-            for d in self.store.find_documents()
-            if (rec := self.store.get_record(d, include_text=False)) is not None
-        )
+        self.spent = job_spend(self.ws, self.job_id)  # earlier attempts count too
         self.check_cap()
         if todo and runner.workers is not None and not self.stop.is_set():
             self.pool = runner.workers.pool(self.manifest.extraction_profile)
         pool_size = self.pool.size if self.pool else 1  # in-process extraction runs one at a time
         extractors = [asyncio.create_task(self.extract_loop(todo)) for _ in range(pool_size)]
         consumers = [
-            asyncio.create_task(self.classify_loop())
-            for _ in range(max(1, runner.classify_concurrency))
+            asyncio.create_task(self.classify_loop()) for _ in range(runner.classify_concurrency)
         ]
 
-        async def pipeline() -> None:
+        async def feed_end() -> None:
             await asyncio.gather(*extractors)
             for _ in consumers:
                 self.queue.put_nowait(None)
-            await asyncio.gather(*consumers)
 
-        main = asyncio.create_task(pipeline())
+        feeder = asyncio.create_task(feed_end())
+        consumed: asyncio.Future[list[None]] = asyncio.gather(*consumers)
         monitor = asyncio.create_task(self.monitor())
-        stopper = asyncio.create_task(self.stop.wait())
+        stopper: asyncio.Future[Any] = asyncio.ensure_future(self.stop.wait())
         try:
-            if not self.stop.is_set():
-                await asyncio.wait({main, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            while not consumed.done() and not self.stop.is_set():
+                waiting: set[asyncio.Future[Any]] = {
+                    f for f in (consumed, feeder, stopper) if not f.done()
+                }
+                await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                if feeder.done() and feeder.exception() is not None:
+                    break
+            if self.stop.is_set():
+                # Stop extracting, but let Classifier calls already in flight finish (they are
+                # billed either way), up to the grace period.
+                for producer in (*extractors, feeder):
+                    producer.cancel()
+                await asyncio.gather(*extractors, feeder, return_exceptions=True)
+                for _ in consumers:
+                    self.queue.put_nowait(None)
+                # A lost lease gets no grace: whoever holds it now owns the Job and bills for it.
+                grace = 0.0 if self.lease_lost else runner.cancel_grace
+                await asyncio.wait({consumed}, timeout=grace)
         finally:
-            for task in (*extractors, *consumers, main, monitor, stopper):
-                task.cancel()
-            await asyncio.gather(
-                *extractors, *consumers, main, monitor, stopper, return_exceptions=True
-            )
+            everything: list[asyncio.Future[Any]] = [
+                *extractors,
+                *consumers,
+                feeder,
+                monitor,
+                stopper,
+            ]
+            for future in everything:
+                future.cancel()
+            await asyncio.gather(*everything, return_exceptions=True)
             if self.pool is not None:
+                if self.pool.cancel_reason == "crash_rate" and self.cancel_reason is None:
+                    self.cancel_reason = "crash_rate"  # reached on the last Document
                 self.pool.close()
-        if main.done() and not main.cancelled() and (error := main.exception()) is not None:
-            raise error
+        for outcome in (feeder, consumed):  # a bug in a stage fails the Job; our own cancels don't
+            if outcome.done() and not outcome.cancelled():
+                error = outcome.exception()
+                if isinstance(error, Exception):
+                    raise error
         if self.lease_lost:
             raise LeaseLostError("the runner lease was lost")
-        if self.cancel_reason is not None and sweep_unfinished(
-            self.ws, self.job_id, self.store, self.manifest
-        ):  # a cancel that arrives after the last Document finished cancels nothing
+        return self.finish()
+
+    def finish(self) -> JobState:
+        reason = self.cancel_reason
+        swept = 0
+        if reason is not None:
+            swept = sweep_unfinished(self.ws, self.job_id, self.store, self.manifest)
+        if reason is not None and (swept or reason in AUTO_CANCEL_REASONS):
             finalize_job(
                 self.ws,
                 self.job_id,
                 "cancelled",
-                cancel_reason=self.cancel_reason,
+                cancel_reason=reason,
                 live=self.live(),
-                prices=runner.config.prices,
             )
             return "cancelled"
-        finalize_job(self.ws, self.job_id, "done", live=self.live(), prices=runner.config.prices)
+        finalize_job(self.ws, self.job_id, "done", live=self.live())
         return "done"
 
     def live(self) -> dict[str, Any]:
         """What only the running runner knows, frozen into the summary."""
         limiter = self.runner.classifier
-        return {
-            "stalled": limiter.stalled,
-            "classifier": {
-                "effective_rate": {
-                    "tokens_per_s": limiter.rate.tokens_per_s,
-                    "requests_per_s": limiter.rate.requests_per_s,
-                },
-                "ceiling": {
-                    "tokens_per_s": limiter.ceiling.tokens_per_s,
-                    "requests_per_s": limiter.ceiling.requests_per_s,
-                },
-            },
-        }
+        return {"stalled": limiter.stalled, "classifier": limiter.rate_summary()}
 
     async def monitor(self) -> None:
-        """Heartbeat the lease, and watch for a cancel request or the pool's crash-rate cancel."""
+        """Heartbeat the lease, apply posted requests, and watch the pool's crash-rate cancel."""
         runner = self.runner
         beat_every = runner.lease_ttl / 3
-        last_beat = time.monotonic()
+        last_beat = runner.clock()
         while True:
-            await asyncio.sleep(runner.poll_interval)
-            if runner.holds_lease and time.monotonic() - last_beat >= beat_every:
-                last_beat = time.monotonic()
-                if not self.ws.heartbeat(runner.holder) and not self.ws.acquire_lease(
-                    runner.holder, runner.lease_ttl
-                ):
-                    self.lease_lost = True
-                    self.stop.set()
-                    return
-            if (reason := read_cancel_request(self.ws, self.job_id)) is not None:
-                self.trigger_cancel(reason)
-            if self.pool is not None and self.pool.cancel_reason is not None:
-                self.trigger_cancel(self.pool.cancel_reason)
+            await runner.sleep(runner.poll_interval)
+            if runner.holds_lease:
+                if runner.clock() - last_beat >= beat_every:
+                    last_beat = runner.clock()
+                    if not self.ws.heartbeat(runner.holder):
+                        # Never take the lease back mid-Job: whoever has it recovers this Job.
+                        runner.holds_lease = False
+                        self.lease_lost = True
+                        self.stop.set()
+                        return
+                apply_requests(self.ws, running=self.job_id, on_cancel=self.trigger_cancel)
+            if self.pool is not None and self.pool.cancel_reason == "crash_rate":
+                self.trigger_cancel("crash_rate")
 
     # Extraction
 
     async def extract_loop(self, todo: deque[str]) -> None:
         while todo and not self.stop.is_set():
             await self.room.acquire()  # backpressure: stop extracting while the Classifier lags
-            if self.stop.is_set() or not todo:
-                self.room.release()
-                return
-            doc_id = todo.popleft()
-            queued = await self.extract_one(doc_id)
-            if queued:
-                self.queue.put_nowait(doc_id)
-            else:
-                self.room.release()
+            doc_id = ""
+            queued = False
+            try:
+                if self.stop.is_set() or not todo:
+                    return
+                doc_id = todo.popleft()
+                queued = await self.extract_one(doc_id)
+            finally:
+                if queued:
+                    self.queue.put_nowait(doc_id)
+                else:
+                    self.room.release()
 
     async def extract_one(self, doc_id: str) -> bool:
         """Extract (or reuse the stored extraction of) one Document. True if it awaits the
@@ -397,9 +449,11 @@ class _JobRun:
         languages = (override and override.ocr_languages) or manifest.ocr_languages
         prior = store.get_record(doc_id)
         attempts = 1 if prior is None else prior.attempts + (prior.status == "failed")
-        if has_extraction(prior):
-            assert prior is not None
+        if prior is not None and has_extraction(prior):
             prior.attempts = attempts
+            # The Record carries this attempt's usage, so it matches its own Judgments. Earlier
+            # attempts' spend stays in the Job's ledger.
+            prior.usage = Usage(ocr_pages=prior.usage.ocr_pages)
             store.save_record(doc_id, "extracted", prior)
             return True
         ref = store.get_input_ref(doc_id)
@@ -424,11 +478,11 @@ class _JobRun:
                     else Path(ref.path)
                 )
                 task = make_extract_task(path, fmt, languages, self.ws.path)
-                record = await extract_stage(record, task, path, self.pool)
+                record = await extract_stage(record, task, path, self.pool, self.runner.extractor)
         if record.status == "failed":
             if record.errors and record.errors[-1].code == "cancelled":
-                if self.pool is not None and self.pool.cancel_reason is not None:
-                    self.trigger_cancel(self.pool.cancel_reason)  # e.g. crash_rate
+                if self.pool is not None and self.pool.cancel_reason == "crash_rate":
+                    self.trigger_cancel("crash_rate")
                 return False  # the pool was cancelled; the sweep records this Document
             store.save_record(doc_id, "failed", record)
             return False
@@ -440,6 +494,8 @@ class _JobRun:
     async def classify_loop(self) -> None:
         while (doc_id := await self.queue.get()) is not None:
             self.room.release()
+            if self.stop.is_set():
+                continue  # cancelled: the Document stays `extracted`, and the sweep records it
             await self.classify_one(doc_id)
 
     async def classify_one(self, doc_id: str) -> None:
@@ -448,12 +504,10 @@ class _JobRun:
         if record is None:
             return
         store.set_state(doc_id, "classifying")
-        before = record_cost(record, self.model, self.runner.config.prices)
         result: ClassifyResult = await classify_stage(
             record, self.manifest, self.specs, self.runner.classifier, self.cache
         )
         record = await self.after_first_pass(result.record)
-        # A Document whose classification failed (or was rejected) still keeps its extraction.
         state: DocumentState = (
             "failed"
             if record.status == "failed"
@@ -462,7 +516,11 @@ class _JobRun:
             else "done"
         )
         store.save_record(doc_id, state, record)
-        self.spent += record_cost(record, self.model, self.runner.config.prices) - before
+        cost = record_cost(record, self.model, self.prices)  # this attempt's usage only
+        add_spend(self.ws, self.job_id, doc_id, cost)
+        self.spent += cost
+        if record.status in ("ok", "partial"):
+            touch_progress(self.ws, self.job_id)
         if result.rejected:
             self.trigger_cancel("classifier_rejected")
         self.check_cap()
@@ -518,7 +576,7 @@ async def stream_job(
     (`serve`) that holds it; either way yield its Records in input order.
 
     If the lease frees up while we wait (the other runner died or finished), we run the Job
-    ourselves. Abandoning the iterator cancels a Job that is still running.
+    ourselves. Abandoning the iterator asks whoever runs a still-unfinished Job to cancel it.
     """
     driver: asyncio.Task[None] | None = None
 
@@ -540,21 +598,29 @@ async def stream_job(
     finally:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
+        if ws.get_job(job_id).state not in FINISHED_STATES:  # the consumer stopped early
+            post_request(ws, "cancel", job_id, "user")
         if driver is not None:
-            if ws.get_job(job_id).state not in FINISHED_STATES:  # the consumer stopped early
-                cancel_marker(ws, job_id).write_text("user", encoding="utf-8")
-            await asyncio.gather(driver, return_exceptions=False)
+            await asyncio.gather(driver, return_exceptions=True)
 
 
-async def run_job(
+async def run(
     spec: JobSpec,
-    classifier: Classifier | None,
-    workers: WorkerSettings | None,
-    workspace: Workspace | None,
+    classifier: Classifier | None = None,
+    workers: WorkerSettings | None = None,
     *,
+    workspace: Workspace | None = None,
     poll_interval: float = 0.1,
+    cancel_grace: float = CANCEL_GRACE,
 ) -> AsyncIterator[DocumentRecord]:
-    """Submit a Job and stream its Records (see `stream_job`)."""
+    """Run a Job and yield one Document Record per input, in input order (docs/spec/v0.md §7.1).
+
+    The Job lives in a Workspace (`workspace`, else `--workspace`/`$ACCELEREAD_HOME`/
+    `~/.acceleread`). It waits its turn in the Workspace's FIFO, and when another runner (`serve`)
+    holds the lease its Records are streamed from the shared queue. Documents the Job could not
+    process because it was cancelled come out with status `cancelled`. Abandoning the iterator
+    cancels the Job.
+    """
     owned = workspace is None
     ws = workspace if workspace is not None else Workspace.open()
     try:
@@ -563,6 +629,7 @@ async def run_job(
             classifier or JevClassifier(model=spec.model),
             workers=workers,
             poll_interval=poll_interval,
+            cancel_grace=cancel_grace,
         )
         job_id = runner.submit(spec)
         async for record in stream_job(ws, runner, job_id, poll_interval=poll_interval):

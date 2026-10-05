@@ -7,9 +7,10 @@ between them and enforces the Job-level policies. Nothing here logs Document tex
 """
 
 import asyncio
+import glob
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,8 +33,8 @@ from acceleread.models import (
 from acceleread.planner import DocumentView, JudgmentSpec, judge_document, judgment_specs
 from acceleread.sections import DetectionInput, Heading, detect_sections
 from acceleread.sections.outline import outline_headings, pdf_outline
-from acceleread.workers import ExtractTask, WorkerPool, WorkerSettings, extract_document
-from acceleread.workspace import InputRef, Workspace
+from acceleread.workers import ExtractTask, WorkerPool, extract_document
+from acceleread.workspace import InputRef
 from acceleread.workspace.cache import JudgmentCache
 
 # Error codes the runner acts on (docs/spec/v0.md §7.5).
@@ -52,12 +53,33 @@ _SEAM_MESSAGES = {
     OVER_BUDGET: "over budget: the state is too large for the Classifier",
 }
 SUFFIX_FORMATS = {".pdf": "pdf", ".html": "html", ".htm": "html"}
+_GLOB = ("*", "?", "[")
 
 
 class ExtractionFailed(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def expand_inputs(spec: JobSpec) -> JobSpec:
+    """Replace each glob input with the files it matches, carrying its overrides along."""
+    inputs = []
+    overrides = dict(spec.overrides)
+    for document in spec.inputs:
+        source = document.source
+        if "://" in source or Path(source).exists() or not any(c in source for c in _GLOB):
+            inputs.append(document)
+            continue
+        matches = sorted(m for m in glob.glob(source, recursive=True) if Path(m).is_file())
+        if not matches:
+            inputs.append(document)  # reported when this Document fails to extract
+            continue
+        inputs += [document.model_copy(update={"source": m}) for m in matches]
+        if source in overrides:
+            override = overrides.pop(source)
+            overrides.update({m: override for m in matches})
+    return spec.model_copy(update={"inputs": inputs, "overrides": overrides})
 
 
 def document_format(source: str) -> str | None:
@@ -137,7 +159,12 @@ def _ignore_page_counts(pages: int, ocr_pages: int) -> None:
 
 
 async def extract(task: ExtractTask, pool: WorkerPool | None) -> Extracted:
-    """Extract in a pool worker when there is one, else in a thread of this process."""
+    """Extract in a pool worker when there is one, else in a thread of this process.
+
+    A pool worker can be killed, so a cancelled Job stops at once. A thread cannot be: with no
+    pool (the library default) a cancel waits for the Document being extracted to finish. The
+    CLI always uses a pool.
+    """
     if pool is None:
         result: Extracted = await asyncio.to_thread(extract_document, task, _ignore_page_counts)
         return result
@@ -168,13 +195,20 @@ async def detect(path: Path, fmt: str, extracted: Extracted) -> list[Section]:
     return await asyncio.to_thread(work)
 
 
+type Extractor = Callable[[ExtractTask, WorkerPool | None], Awaitable[Extracted]]
+
+
 async def extract_stage(
-    record: DocumentRecord, task: ExtractTask, path: Path, pool: WorkerPool | None
+    record: DocumentRecord,
+    task: ExtractTask,
+    path: Path,
+    pool: WorkerPool | None,
+    extractor: Extractor = extract,
 ) -> DocumentRecord:
     """extracting: Pages, text and Sections into the Record. Failures still yield a Record."""
     started = time.perf_counter()
     try:
-        extracted = await extract(task, pool)
+        extracted = await extractor(task, pool)
     except Exception as exc:  # any extraction failure still yields a Record
         code = exc.code if isinstance(exc, ExtractionFailed) else type(exc).__name__
         return failed(record, "extract", code, str(exc))
@@ -257,23 +291,3 @@ async def classify_stage(
         record.status = "partial" if record.errors else "ok"
     record.timings.classify_ms += round((time.perf_counter() - started) * 1000)
     return ClassifyResult(record, rejected=CLASSIFIER_REJECTED in codes)
-
-
-async def run(
-    spec: JobSpec,
-    classifier: Classifier | None = None,
-    workers: WorkerSettings | None = None,
-    *,
-    workspace: Workspace | None = None,
-) -> AsyncIterator[DocumentRecord]:
-    """Run a Job and yield one Document Record per input, in input order (docs/spec/v0.md §7.1).
-
-    The Job lives in a Workspace (`workspace`, else `--workspace`/`$ACCELEREAD_HOME`/
-    `~/.acceleread`). It waits its turn in the Workspace's FIFO, and when another runner (`serve`)
-    holds the lease its Records are streamed from the shared queue. Records the Job could not
-    process because it was cancelled come out with status `cancelled`.
-    """
-    from acceleread.runner import run_job
-
-    async for record in run_job(spec, classifier, workers, workspace):
-        yield record

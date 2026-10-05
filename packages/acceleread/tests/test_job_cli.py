@@ -290,3 +290,46 @@ def test_cancel_marks_a_running_job_for_its_runner(cli: Cli, fake: Any):
         assert cancel_job(ws, job_id) == "requested"
     code, out, _ = cli("cancel", job_id)
     assert code == 0 and "requested" in out
+
+
+def test_run_exits_1_only_for_failed_documents(
+    cli: Cli, fake_classifier: Fake, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # A Classifier error leaves a `partial` Record: the run still succeeded.
+    flaky = fake_classifier(raises=lambda _: RuntimeError("boom"))
+    monkeypatch.setattr("acceleread.cli.make_classifier", lambda model: flaky)
+    code, out, _ = cli("run", str(SAMPLE), "--taxonomy", str(TAXONOMY_FILE))
+    assert lines(out)[0]["status"] == "partial" and code == 0
+
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"not a pdf")
+    code, out, _ = cli("run", str(broken), "--taxonomy", str(TAXONOMY_FILE))
+    assert lines(out)[0]["status"] == "failed" and code == 1
+
+
+def test_run_writes_the_manifest_beside_its_output(cli: Cli, fake: Any, tmp_path: Path):
+    out = tmp_path / "records.jsonl"
+    assert cli("run", str(SAMPLE), "--taxonomy", str(TAXONOMY_FILE), "-o", str(out))[0] == 0
+    manifest = json.loads((tmp_path / "records.manifest.json").read_text())
+    assert manifest["taxonomy"]["name"] == "sector"
+
+
+def test_export_over_the_server_fetches_the_manifest_too(
+    cli: Cli, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, text='{"model": "jev"}')
+        return httpx.Response(200, text='{"a": 1}\n')
+
+    served(monkeypatch, handler)
+    out = tmp_path / "x.jsonl"
+    assert cli("--server", "http://x", "export", "j1", "-o", str(out))[0] == 0
+    assert out.read_text() == '{"a": 1}\n'
+    assert (tmp_path / "x.manifest.json").read_text() == '{"model": "jev"}'
+
+
+def test_validate_prints_the_cost_and_duration_estimates(cli: Cli, fake: Any):
+    code, out, _ = cli("validate", str(SAMPLE), "--taxonomy", str(TAXONOMY_FILE))
+    assert code == 0
+    assert "estimated cost up to $" in out and "Classifier-bound duration" in out

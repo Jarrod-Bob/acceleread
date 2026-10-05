@@ -13,7 +13,7 @@ import pytest
 from acceleread.classifier import ClassifierRejected, ClassifierUnavailable
 from acceleread.languages import workspace_tessdata
 from acceleread.models import DocumentRecord, JobSpec, Question, Taxonomy
-from acceleread.pipeline import make_extract_task
+from acceleread.pipeline import extract, make_extract_task
 from acceleread.ratelimit import RateLimit, RateLimitedClassifier
 from acceleread.runner import Runner
 from acceleread.validate import SpecError
@@ -328,18 +328,26 @@ async def test_extraction_stops_while_too_many_documents_await_the_classifier(
 ):
     gate = asyncio.Event()
     classifier = fake_classifier(gate=gate)
-    runner = runner_for(ws, classifier, backpressure=2, classify_concurrency=1)
+    extracted: list[str] = []
+
+    async def counting(task: Any, pool: Any) -> Any:
+        extracted.append(task.path.name)
+        return await extract(task, pool)
+
+    runner = runner_for(ws, classifier, backpressure=2, classify_concurrency=1, extractor=counting)
     job_id = runner.submit(JobSpec(inputs=copies(tmp_path, 6), taxonomy=TAXONOMY))
     task = asyncio.create_task(runner.execute(job_id))
-    while not classifier.calls:
-        await settle(0.02)
-    await settle(0.5)  # plenty of time for extraction to run ahead, if it were allowed to
+    while len(extracted) < 3 or not classifier.calls:  # 1 classifying + 2 awaiting, the limit
+        await asyncio.sleep(0.005)
+    for _ in range(200):  # give extraction every chance to run ahead, if it were allowed to
+        await asyncio.sleep(0)
 
     with ws.read_job(job_id) as store:
         states = list(store.states().values())
     assert states.count("classifying") == 1
     assert states.count("extracted") == 2  # the limit
     assert states.count("queued") == 3  # not extracted yet
+    assert len(extracted) == 3
 
     gate.set()
     assert await task == "done"

@@ -79,6 +79,10 @@ class ServerClient:
     def retry(self, job_id: str) -> None:
         self._request("POST", f"/jobs/{job_id}/retry")
 
+    def manifest(self, job_id: str) -> str:
+        """The Job's resolved manifest, as the server serves it."""
+        return self._request("GET", f"/jobs/{job_id}/manifest").text
+
     def export(self, job_id: str, *, include_text: bool = True) -> Iterator[str]:
         """The Job's JSONL, one line per Document, streamed."""
         params = {"include_text": "true" if include_text else "false"}

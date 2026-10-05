@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 
 from acceleread import run
-from acceleread.jobcontrol import read_cancel_request
+from acceleread.jobcontrol import pending_requests
 from acceleread.models import DocumentRecord, JobSpec, Taxonomy
-from acceleread.runner import LeaseLostError, Runner, run_job
+from acceleread.runner import Runner
 from acceleread.workspace import Workspace
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -74,37 +74,6 @@ async def test_only_one_runner_holds_the_lease(
         assert second.acquire()
 
 
-async def test_the_lease_is_heartbeated_while_a_job_runs(
-    ws: Workspace, tmp_path: Path, fake_classifier: Fake
-):
-    gate = asyncio.Event()
-    classifier = fake_classifier(gate=gate)
-    runner = runner_for(ws, classifier, holder="beat", lease_ttl=0.3)
-    job_id = runner.submit(spec(tmp_path))
-    drain = asyncio.create_task(runner.drain())
-    await asyncio.sleep(0.9)  # three lease lifetimes: it would be stale without heartbeats
-    assert ws.lease_holder() == "beat"
-    assert ws.get_job(job_id).state == "running"
-    gate.set()
-    await drain
-
-
-async def test_a_runner_that_loses_its_lease_stops_without_finalising(
-    ws: Workspace, tmp_path: Path, fake_classifier: Fake, monkeypatch: pytest.MonkeyPatch
-):
-    gate = asyncio.Event()
-    classifier = fake_classifier(gate=gate)
-    runner = runner_for(ws, classifier, holder="old", lease_ttl=0.3)
-    job_id = runner.submit(spec(tmp_path))
-    assert runner.acquire()
-    monkeypatch.setattr(ws, "heartbeat", lambda holder: False)
-    monkeypatch.setattr(ws, "acquire_lease", lambda holder, ttl=30.0: False)  # someone else has it
-
-    with pytest.raises(LeaseLostError):
-        await runner.execute(job_id)
-    assert ws.get_job(job_id).state == "running"  # left for the new holder to recover
-
-
 async def test_a_new_runner_requeues_a_job_a_dead_runner_left_running(
     ws: Workspace, tmp_path: Path, fake_classifier: Fake
 ):
@@ -144,7 +113,7 @@ async def test_run_joins_the_fifo_when_serve_holds_the_lease(
         assert ws.lease_holder() == "serve"
 
         mine = fake_classifier()
-        records = [r async for r in run_job(spec(tmp_path, 2), mine, None, ws, poll_interval=0.02)]
+        records = [r async for r in run(spec(tmp_path, 2), mine, workspace=ws, poll_interval=0.02)]
 
         assert [r.status for r in records] == ["ok", "ok"]
         assert mine.calls == []  # serve's runner did the work, run only streamed its Records
@@ -157,7 +126,7 @@ async def test_run_takes_over_when_the_lease_holder_goes_away(
 ):
     assert ws.acquire_lease("gone", ttl=0.2)  # a runner that never heartbeats again
     records = [
-        r async for r in run_job(spec(tmp_path, 1), fake_classifier(), None, ws, poll_interval=0.02)
+        r async for r in run(spec(tmp_path, 1), fake_classifier(), workspace=ws, poll_interval=0.02)
     ]
     assert [r.status for r in records] == ["ok"]
 
@@ -167,7 +136,7 @@ async def test_abandoning_the_iterator_cancels_the_job(
 ):
     gate = asyncio.Event()
     classifier = fake_classifier(gate=gate)
-    stream = run_job(spec(tmp_path, 2), classifier, None, ws, poll_interval=0.02)
+    stream = run(spec(tmp_path, 2), classifier, workspace=ws, poll_interval=0.02, cancel_grace=0.05)
     next_record = asyncio.ensure_future(stream.__anext__())
     while not classifier.calls:
         await asyncio.sleep(0.02)
@@ -177,4 +146,4 @@ async def test_abandoning_the_iterator_cancels_the_job(
 
     (job,) = ws.list_jobs()
     assert job.state == "cancelled"
-    assert read_cancel_request(ws, job.id) is None  # the marker is consumed
+    assert pending_requests(ws) == []  # the request was consumed

@@ -7,14 +7,15 @@ them all at once. `resolve()` is for callers that need the manifest and want a b
 
 import difflib
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from acceleread.classifier import Capabilities
-from acceleread.jev import JEV_CAPABILITIES
+from acceleread.estimate import estimate_job
+from acceleread.jev import JEV_CAPABILITIES, JEV_RATE_LIMIT
 from acceleread.languages import RAPIDOCR_CODES, TESSERACT_CODES
 from acceleread.models import (
     CANONICAL_SECTION_KEYS,
@@ -30,6 +31,8 @@ from acceleread.models import (
     Taxonomy,
     TaxonomyRef,
 )
+from acceleread.pipeline import expand_inputs
+from acceleread.ratelimit import RateLimit
 
 TAXONOMY_BUDGET_WARNING_SHARE = 0.20
 
@@ -46,12 +49,12 @@ class Finding:
 
 @dataclass(frozen=True)
 class Estimate:
-    """Cost and Classifier-bound duration. Stubbed until the price table and limiter exist."""
+    """Cost and Classifier-bound duration (an upper bound, see `estimate.py`)."""
 
     documents: int
     cost_usd: float | None = None
     duration_seconds: float | None = None
-    stubbed: bool = True
+    stubbed: bool = False  # True only when nothing could be estimated
 
 
 @dataclass
@@ -255,16 +258,27 @@ def validate(
     capabilities: Capabilities = JEV_CAPABILITIES,
     installed_languages: Collection[str] = VENDORED_OCR_LANGUAGES,
     extra_section_keys: Collection[str] = (),
+    rate_limit: RateLimit | None = None,
+    prices: Mapping[str, float] | None = None,
 ) -> ValidationReport:
-    """Dry-run every submit check. `extra_section_keys` are keys a detector declares."""
+    """Dry-run every submit check, and estimate cost and duration. `extra_section_keys` are keys
+    a detector declares; `rate_limit` is the Classifier's ceiling (Jev's by default)."""
     keys = {*CANONICAL_SECTION_KEYS, *extra_section_keys} - {OTHER}
     errors, warnings, manifest = _check(spec, capabilities, installed_languages, keys)
-    return ValidationReport(
-        errors=errors,
-        warnings=warnings,
-        estimate=Estimate(documents=len(spec.inputs)),
-        manifest=manifest,
-    )
+    estimate = Estimate(documents=len(spec.inputs))
+    if manifest is not None:
+        if rate_limit is None and manifest.model.startswith("jev"):
+            rate_limit = JEV_RATE_LIMIT
+        cost, seconds = estimate_job(
+            expand_inputs(spec), manifest, capabilities, rate_limit, prices
+        )
+        estimate = Estimate(
+            documents=len(spec.inputs),
+            cost_usd=cost,
+            duration_seconds=seconds,
+            stubbed=cost is None and seconds is None,
+        )
+    return ValidationReport(errors=errors, warnings=warnings, estimate=estimate, manifest=manifest)
 
 
 def resolve(

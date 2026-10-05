@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-import acceleread.pipeline as pipeline
 from acceleread.classifier import ClassifierUnavailable
 from acceleread.jobcontrol import (
     JobFinishedError,
@@ -24,6 +23,7 @@ from acceleread.jobcontrol import (
     update_manifest,
 )
 from acceleread.models import DocumentRecord, JobSpec, Taxonomy
+from acceleread.pipeline import extract
 from acceleread.ratelimit import RateLimit, RateLimitedClassifier
 from acceleread.runner import Runner
 from acceleread.workers import Outcome, WorkerSettings
@@ -66,18 +66,24 @@ def runner_for(ws: Workspace, classifier: Any, **kw: Any) -> Runner:
     return Runner(ws, classifier, **kw)
 
 
+class Extractions:
+    """Counts the files extracted, so a test can prove OCR was not redone. Passed to the Runner
+    as its `extractor`: a public seam, no patching."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    async def __call__(self, task: Any, pool: Any) -> Any:
+        self.seen.append(task.path.name)
+        return await extract(task, pool)
+
+    def __len__(self) -> int:
+        return len(self.seen)
+
+
 @pytest.fixture
-def extractions(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """The files extracted so far, so a test can prove OCR was not redone."""
-    seen: list[str] = []
-    real = pipeline.extract
-
-    async def counting(task: Any, pool: Any) -> Any:
-        seen.append(task.path.name)
-        return await real(task, pool)
-
-    monkeypatch.setattr(pipeline, "extract", counting)
-    return seen
+def extractions() -> Extractions:
+    return Extractions()
 
 
 def spec(paths: list[Path], **kw: Any) -> JobSpec:
@@ -106,7 +112,7 @@ async def test_cancelling_a_running_job_stops_it_and_keeps_extracted_work(
 ):
     gate = asyncio.Event()
     classifier = fake_classifier(gate=gate)
-    runner = runner_for(ws, classifier, classify_concurrency=1)
+    runner = runner_for(ws, classifier, classify_concurrency=1, cancel_grace=0.05)
     assert runner.acquire()  # a live runner holds the lease
     job_id = runner.submit(spec(copies(tmp_path, 3)))
     task = asyncio.create_task(runner.execute(job_id))
@@ -136,11 +142,13 @@ async def test_cancelling_a_finished_job_is_refused(
 
 
 async def test_resume_requeues_cancelled_documents_without_redoing_extraction(
-    ws: Workspace, tmp_path: Path, fake_classifier: Fake, extractions: list[str]
+    ws: Workspace, tmp_path: Path, fake_classifier: Fake, extractions: Extractions
 ):
     gate = asyncio.Event()
     classifier = fake_classifier(gate=gate)
-    runner = runner_for(ws, classifier, classify_concurrency=1)
+    runner = runner_for(
+        ws, classifier, classify_concurrency=1, cancel_grace=0.05, extractor=extractions
+    )
     assert runner.acquire()  # a live runner holds the lease
     job_id = runner.submit(spec(copies(tmp_path, 3)))
     task = asyncio.create_task(runner.execute(job_id))
@@ -148,8 +156,9 @@ async def test_resume_requeues_cancelled_documents_without_redoing_extraction(
         await asyncio.sleep(0.02)
     cancel_job(ws, job_id)
     await task
+    runner.release()  # nobody holds the lease now, so resume writes directly
 
-    assert resume_job(ws, job_id) == 3
+    assert resume_job(ws, job_id).count == 3
     assert ws.get_job(job_id).state == "queued"
     gate.set()
     assert await runner.execute(job_id) == "done"
@@ -157,7 +166,7 @@ async def test_resume_requeues_cancelled_documents_without_redoing_extraction(
     assert [r.status for r in records_of(ws, job_id)] == ["ok"] * 3
     # Only Documents never extracted were extracted again; the extracted ones were not.
     assert len(extractions) == 3
-    assert len(set(extractions)) == 3
+    assert len(set(extractions.seen)) == 3
 
 
 async def test_resume_leaves_a_finished_job_alone(
@@ -166,7 +175,7 @@ async def test_resume_leaves_a_finished_job_alone(
     runner = runner_for(ws, fake_classifier())
     job_id = runner.submit(spec(copies(tmp_path, 1)))
     await runner.execute(job_id)
-    assert resume_job(ws, job_id) == 0
+    assert resume_job(ws, job_id).count == 0
     assert ws.get_job(job_id).state == "done"
 
 
@@ -191,20 +200,22 @@ async def test_resume_is_refused_while_the_job_runs(
 
 
 async def test_retry_failed_replaces_the_record_and_counts_attempts(
-    ws: Workspace, tmp_path: Path, fake_classifier: Fake, extractions: list[str]
+    ws: Workspace, tmp_path: Path, fake_classifier: Fake, extractions: Extractions
 ):
     broken = fake_classifier(raises=lambda _: ClassifierUnavailable("503"))
     runner = runner_for(
-        ws, RateLimitedClassifier(broken, RateLimit(1e9, 1e6), max_unavailable_tries=1)
+        ws,
+        RateLimitedClassifier(broken, RateLimit(1e9, 1e6), max_unavailable_tries=1),
+        extractor=extractions,
     )
     job_id = runner.submit(spec(copies(tmp_path, 2)))
     await runner.execute(job_id)
     assert states_of(ws, job_id) == ["failed", "failed"]
     assert [r.attempts for r in records_of(ws, job_id)] == [1, 1]
 
-    assert retry_failed(ws, job_id) == 2
+    assert retry_failed(ws, job_id).count == 2
     assert ws.get_job(job_id).state == "queued"
-    healthy = runner_for(ws, fake_classifier())
+    healthy = runner_for(ws, fake_classifier(), extractor=extractions)
     assert await healthy.execute(job_id) == "done"
 
     records = records_of(ws, job_id)
@@ -241,7 +252,7 @@ async def test_reaching_the_spend_cap_auto_cancels_and_a_raised_cap_lets_resume_
 ):
     # 1M input tokens at Jev's $0.042 per 1M is $0.042 a Document.
     classifier = fake_classifier(model="jev-fake", input_tokens=1_000_000)
-    runner = runner_for(ws, classifier, classify_concurrency=1)
+    runner = runner_for(ws, classifier, classify_concurrency=1, cancel_grace=0.05)
     job_id = runner.submit(spec(copies(tmp_path, 5), max_cost_usd=0.05, cache=False))
 
     assert await runner.execute(job_id) == "cancelled"
@@ -252,7 +263,7 @@ async def test_reaching_the_spend_cap_auto_cancels_and_a_raised_cap_lets_resume_
     assert summary["classifier"]["estimated_cost_usd"] == pytest.approx(0.084)
 
     update_manifest(ws, job_id, {"max_cost_usd": 1.0})
-    assert resume_job(ws, job_id) == 3
+    assert resume_job(ws, job_id).count == 3
     assert await runner.execute(job_id) == "done"
     assert [r.status for r in records_of(ws, job_id)] == ["ok"] * 5
 
@@ -297,7 +308,7 @@ async def test_the_summary_reports_progress_usage_extraction_and_failures(
     assert summary["extraction"]["pages"] == 4
     failure = summary["failures"]["PdfiumError"]
     assert failure["count"] == 1 and failure["examples"] == ["000000"]
-    assert summary["flags"] == {"stalled": False, "cancel_reason": None}
+    assert summary["flags"] == {"stalled": False, "cancel_reason": None, "error": None}
     frozen = json.loads((ws.job_dir(job_id) / "summary.json").read_text())
     assert frozen["classifier"]["ceiling"]["requests_per_s"] > 0
     assert frozen["state"] == "done"

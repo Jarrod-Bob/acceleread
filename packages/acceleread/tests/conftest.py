@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import pytest
 
@@ -44,6 +45,8 @@ class FakeClassifier:
         self.gate = gate  # when set, judge() waits for it
         self.raises = raises
         self.calls: list[tuple[JSONState, list[str]]] = []
+        self.in_flight = 0
+        self.max_in_flight = 0
 
     @property
     def capabilities(self) -> Capabilities:
@@ -58,8 +61,13 @@ class FakeClassifier:
 
     async def judge(self, state: JSONState, judgments: Mapping[str, Ask]) -> ClassifierResponse:
         self.calls.append((state, list(judgments)))
-        if self.gate is not None:
-            await self.gate.wait()
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+        finally:
+            self.in_flight -= 1
         if self.raises is not None and (error := self.raises(state)) is not None:
             raise error
         results: dict[str, JudgmentResult] = {}
@@ -83,3 +91,40 @@ class FakeClassifier:
 @pytest.fixture
 def fake_classifier() -> Callable[..., FakeClassifier]:
     return FakeClassifier
+
+
+class FakeClock:
+    """A clock the test moves by hand, shared by a Workspace (lease) and a Runner (heartbeat)."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.t = start
+
+    def now(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+    async def sleep(self, seconds: float) -> None:
+        """Time passes instantly: advance the clock and let other tasks run."""
+        self.t += seconds
+        await asyncio.sleep(0.001)
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+async def _until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Wait for something to become true, polling quickly; fail rather than hang."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not condition():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.005)
+
+
+@pytest.fixture
+def until() -> Callable[..., Any]:
+    return _until

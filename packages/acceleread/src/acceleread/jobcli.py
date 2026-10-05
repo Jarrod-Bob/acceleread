@@ -11,29 +11,31 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Literal, Protocol, TextIO
 
 import yaml
 from pydantic import ValidationError
 
 from acceleread.classifier import Classifier
+from acceleread.config import load_config
 from acceleread.extract import VENDORED_TESSDATA
 from acceleread.jobcontrol import (
     JobFinishedError,
+    Requeue,
     cancel_job,
     job_summary,
     load_manifest,
+    manifest_path,
     resume_job,
     retry_failed,
 )
 from acceleread.languages import installed_languages, workspace_tessdata
 from acceleread.models import DEFAULT_JEV_MODEL, JobSpec, Taxonomy
-from acceleread.pipeline import run
-from acceleread.runner import Runner, expand_inputs, stream_job
+from acceleread.runner import Runner, run, stream_job
 from acceleread.serverclient import ServerClient, ServerError
 from acceleread.validate import Finding, SpecError, validate
 from acceleread.workers import WorkerSettings
@@ -176,7 +178,7 @@ def _findings(findings: list[Finding], label: str, out: TextIO) -> None:
 
 
 @contextmanager
-def open_workspace(args: argparse.Namespace) -> Any:
+def open_workspace(args: argparse.Namespace) -> Iterator[Workspace]:
     try:
         workspace = Workspace.open(args.workspace, allow_network_fs=args.allow_network_fs)
     except NetworkFilesystemError as err:
@@ -185,19 +187,174 @@ def open_workspace(args: argparse.Namespace) -> Any:
         yield workspace
 
 
+# One interface for the in-process Workspace and a remote server: commands call a Backend and
+# never ask which one it is.
+
+
+class Backend(Protocol):
+    def jobs(self, include_all: bool) -> list[dict[str, Any]]: ...
+
+    def summary(self, job_id: str | None) -> dict[str, Any]: ...
+
+    def cancel(self, job_id: str) -> str: ...
+
+    def requeue(self, kind: Literal["resume", "retry"], job_id: str) -> Requeue: ...
+
+    def export_lines(self, job_id: str, include_text: bool) -> Iterable[str]: ...
+
+    def manifest_text(self, job_id: str) -> str: ...
+
+    def drive(
+        self, job_id: str, workers: WorkerSettings, make_classifier: ClassifierFactory
+    ) -> int:
+        """Run a re-queued Job to its end if this backend is the one running Jobs."""
+        ...
+
+
+class LocalBackend:
+    def __init__(self, ws: Workspace) -> None:
+        self.ws = ws
+
+    def jobs(self, include_all: bool) -> list[dict[str, Any]]:
+        jobs = []
+        for info in self.ws.list_jobs(include_ingest=include_all):
+            entry: dict[str, Any] = info.model_dump()
+            try:
+                with self.ws.read_job(info.id) as store:
+                    entry["documents"] = len(store.states())
+            except (OSError, StorageVersionError):
+                entry["documents"] = None
+            jobs.append(entry)
+        return jobs
+
+    def summary(self, job_id: str | None) -> dict[str, Any]:
+        if job_id is None:
+            listed = self.ws.list_jobs()
+            if not listed:
+                raise CliError("no Jobs in this Workspace")
+            job_id = listed[-1].id
+        try:
+            return job_summary(self.ws, job_id)
+        except KeyError:
+            raise CliError(f"no such Job: {job_id}") from None
+
+    def cancel(self, job_id: str) -> str:
+        try:
+            outcome = cancel_job(self.ws, job_id)
+        except KeyError:
+            raise CliError(f"no such Job: {job_id}") from None
+        except JobFinishedError as err:
+            raise CliError(str(err)) from err
+        if outcome == "cancelled":
+            return f"cancelled {job_id}"
+        return f"cancel requested for {job_id}; the running Job stops shortly"
+
+    def requeue(self, kind: Literal["resume", "retry"], job_id: str) -> Requeue:
+        try:
+            return (resume_job if kind == "resume" else retry_failed)(self.ws, job_id)
+        except KeyError:
+            raise CliError(f"no such Job: {job_id}") from None
+        except (JobRunningError, JobPrunedError, StorageVersionError) as err:
+            raise CliError(str(err)) from err
+
+    def export_lines(self, job_id: str, include_text: bool) -> Iterator[str]:
+        try:
+            self.ws.get_job(job_id)
+        except KeyError:
+            raise CliError(f"no such Job: {job_id}") from None
+        with self.ws.read_job(job_id) as store:
+            for doc_id in store.states():
+                record = store.get_record(doc_id, include_text=include_text)
+                if record is not None:  # a running Job exports what is finished so far
+                    yield record.model_dump_json(exclude_none=True)
+
+    def manifest_text(self, job_id: str) -> str:
+        return manifest_path(self.ws, job_id).read_text("utf-8")
+
+    def drive(
+        self, job_id: str, workers: WorkerSettings, make_classifier: ClassifierFactory
+    ) -> int:
+        """Run the Job here (or follow the runner that holds the lease), progress to stderr."""
+        return asyncio.run(self._drive(job_id, workers, make_classifier))
+
+    async def _drive(
+        self, job_id: str, workers: WorkerSettings, make_classifier: ClassifierFactory
+    ) -> int:
+        runner = Runner(
+            self.ws, make_classifier(load_manifest(self.ws, job_id).model), workers=workers
+        )
+        failed = 0
+        async for record in stream_job(self.ws, runner, job_id):
+            failed += record.status == "failed"
+            print(f"{record.source.filename}: {record.status}", file=sys.stderr)
+        return 1 if failed else 0
+
+
+class ServerBackend:
+    def __init__(self, client: ServerClient) -> None:
+        self.client = client
+
+    def jobs(self, include_all: bool) -> list[dict[str, Any]]:
+        return self.client.jobs(include_ingest=include_all)
+
+    def summary(self, job_id: str | None) -> dict[str, Any]:
+        if job_id is None:
+            jobs = self.client.jobs()
+            if not jobs:
+                raise CliError("no Jobs on the server")
+            job_id = jobs[-1]["id"]
+        return self.client.summary(job_id)
+
+    def cancel(self, job_id: str) -> str:
+        self.client.cancel(job_id)
+        return f"cancel requested for {job_id}"
+
+    def requeue(self, kind: Literal["resume", "retry"], job_id: str) -> Requeue:
+        (self.client.resume if kind == "resume" else self.client.retry)(job_id)
+        return Requeue(0, requested=True)
+
+    def export_lines(self, job_id: str, include_text: bool) -> Iterable[str]:
+        return self.client.export(job_id, include_text=include_text)
+
+    def manifest_text(self, job_id: str) -> str:
+        return self.client.manifest(job_id)
+
+    def drive(
+        self, job_id: str, workers: WorkerSettings, make_classifier: ClassifierFactory
+    ) -> int:
+        return 0  # the server runs it
+
+
+@contextmanager
+def open_backend(args: argparse.Namespace) -> Iterator[Backend]:
+    if args.server:
+        with ServerClient(args.server) as client:
+            yield ServerBackend(client)
+    else:
+        with open_workspace(args) as ws:
+            yield LocalBackend(ws)
+
+
 # run
+
+
+def write_manifest_beside(output: Path, manifest_text: str) -> None:
+    """The Job manifest goes beside the JSONL (spec §6): `out.jsonl` -> `out.manifest.json`."""
+    output.with_name(output.stem + ".manifest.json").write_text(manifest_text, encoding="utf-8")
 
 
 async def _run(
     spec: JobSpec, out: TextIO, workers: WorkerSettings, ws: Workspace, classifier: Classifier
-) -> int:
+) -> tuple[int, str | None]:
     failed = 0
+    job_id: str | None = None
     async for record in run(spec, classifier, workers, workspace=ws):
         out.write(record.model_dump_json(exclude_none=True) + "\n")
         out.flush()
-        failed += record.status != "ok"
+        failed += record.status == "failed"
+        job_id = record.job_id
         print(f"{record.source.filename}: {record.status}", file=sys.stderr)
-    return 1 if failed else 0
+    return (1 if failed else 0), job_id
 
 
 def run_command(args: argparse.Namespace, make_classifier: ClassifierFactory) -> int:
@@ -208,8 +365,11 @@ def run_command(args: argparse.Namespace, make_classifier: ClassifierFactory) ->
         try:
             if args.output:
                 with args.output.open("w", encoding="utf-8") as out:
-                    return asyncio.run(_run(spec, out, workers, ws, classifier))
-            return asyncio.run(_run(spec, sys.stdout, workers, ws, classifier))
+                    code, job_id = asyncio.run(_run(spec, out, workers, ws, classifier))
+                if job_id is not None:
+                    write_manifest_beside(args.output, LocalBackend(ws).manifest_text(job_id))
+                return code
+            return asyncio.run(_run(spec, sys.stdout, workers, ws, classifier))[0]
         except SpecError as err:
             _findings(err.findings, "error", sys.stderr)
             return 2
@@ -217,29 +377,29 @@ def run_command(args: argparse.Namespace, make_classifier: ClassifierFactory) ->
 
 def validate_command(args: argparse.Namespace, make_classifier: ClassifierFactory) -> int:
     spec = build_spec(args)
-    languages = installed_languages(
-        [VENDORED_TESSDATA, workspace_tessdata(resolve_workspace_path(args.workspace))]
-    )
-    spec = expand_inputs(spec)
+    workspace = resolve_workspace_path(args.workspace)
+    config = load_config(workspace)
+    languages = installed_languages([VENDORED_TESSDATA, workspace_tessdata(workspace)])
     report = validate(
         spec,
         capabilities=make_classifier(spec.model).capabilities,
         installed_languages=languages,
+        rate_limit=config.rate_limit,
+        prices=config.prices,
     )
     _findings(report.errors, "error", sys.stderr)
     _findings(report.warnings, "warning", sys.stderr)
-    print(f"{len(spec.inputs)} Documents; cost and duration are not estimated yet")
+    estimate = report.estimate
+    line = f"{estimate.documents} Documents"
+    if estimate.cost_usd is not None:
+        line += f"; estimated cost up to ${estimate.cost_usd:.4f}"
+    if estimate.duration_seconds is not None:
+        line += f"; Classifier-bound duration about {estimate.duration_seconds:.0f}s"
+    print(line)
     return 0 if report.ok else 2
 
 
 # status, jobs, cancel, resume, retry
-
-
-def _latest_job(ws: Workspace) -> str:
-    jobs = ws.list_jobs()
-    if not jobs:
-        raise CliError("no Jobs in this Workspace")
-    return jobs[-1].id
 
 
 def format_summary(summary: dict[str, Any]) -> str:
@@ -276,107 +436,38 @@ def _job_line(job: dict[str, Any]) -> str:
     return f"{job['id']}  {job['state']:<9} {job['kind']:<6} {docs:<10} {when}"
 
 
-def list_jobs_command(args: argparse.Namespace) -> int:
-    if args.server:
-        with ServerClient(args.server) as client:
-            jobs = client.jobs(include_ingest=args.all)
-    else:
-        with open_workspace(args) as ws:
-            jobs = []
-            for info in ws.list_jobs(include_ingest=args.all):
-                entry: dict[str, Any] = info.model_dump()
-                try:
-                    with ws.read_job(info.id) as store:
-                        entry["documents"] = len(store.states())
-                except (OSError, StorageVersionError):
-                    entry["documents"] = None
-                jobs.append(entry)
-    for job in jobs:
-        print(_job_line(job))
+def _jobs(args: argparse.Namespace) -> int:
+    with open_backend(args) as backend:
+        for job in backend.jobs(args.all):
+            print(_job_line(job))
     return 0
 
 
 def _status(args: argparse.Namespace) -> int:
-    if args.server:
-        with ServerClient(args.server) as client:
-            summary = client.summary(args.job_id) if args.job_id else _server_latest(client)
-    else:
-        with open_workspace(args) as ws:
-            job_id = args.job_id or _latest_job(ws)
-            try:
-                summary = job_summary(ws, job_id, prices=_prices(ws))
-            except KeyError:
-                raise CliError(f"no such Job: {job_id}") from None
+    with open_backend(args) as backend:
+        summary = backend.summary(args.job_id)
     print(json.dumps(summary, indent=2) if args.json else format_summary(summary))
     return 0
 
 
-def _server_latest(client: ServerClient) -> dict[str, Any]:
-    jobs = client.jobs()
-    if not jobs:
-        raise CliError("no Jobs on the server")
-    return client.summary(jobs[-1]["id"])
-
-
-def _prices(ws: Workspace) -> dict[str, float]:
-    from acceleread.config import load_config
-
-    return load_config(ws.path).prices
-
-
 def _cancel(args: argparse.Namespace) -> int:
-    if args.server:
-        with ServerClient(args.server) as client:
-            client.cancel(args.job_id)
-        print(f"cancel requested for {args.job_id}")
-        return 0
-    with open_workspace(args) as ws:
-        try:
-            outcome = cancel_job(ws, args.job_id)
-        except KeyError:
-            raise CliError(f"no such Job: {args.job_id}") from None
-        except JobFinishedError as err:
-            raise CliError(str(err)) from err
-    print(
-        f"cancelled {args.job_id}"
-        if outcome == "cancelled"
-        else f"cancel requested for {args.job_id}; the running Job stops shortly"
-    )
+    with open_backend(args) as backend:
+        print(backend.cancel(args.job_id))
     return 0
 
 
-async def _drive(
-    ws: Workspace, job_id: str, workers: WorkerSettings, make_classifier: ClassifierFactory
-) -> int:
-    """Run a re-queued Job here (or follow the runner that holds the lease), progress to stderr."""
-    runner = Runner(ws, make_classifier(load_manifest(ws, job_id).model), workers=workers)
-    bad = 0
-    async for record in stream_job(ws, runner, job_id):
-        bad += record.status != "ok"
-        print(f"{record.source.filename}: {record.status}", file=sys.stderr)
-    return 1 if bad else 0
-
-
 def _requeue(args: argparse.Namespace, make_classifier: ClassifierFactory) -> int:
-    server_action = "resume" if args.command == "resume" else "retry"
-    if args.server:
-        with ServerClient(args.server) as client:
-            getattr(client, server_action)(args.job_id)
-        print(f"{server_action} requested for {args.job_id}")
-        return 0
-    with open_workspace(args) as ws:
-        try:
-            count = (resume_job if args.command == "resume" else retry_failed)(ws, args.job_id)
-        except KeyError:
-            raise CliError(f"no such Job: {args.job_id}") from None
-        except (JobRunningError, JobPrunedError, StorageVersionError) as err:
-            raise CliError(str(err)) from err
-        if count == 0:
+    with open_backend(args) as backend:
+        result = backend.requeue(args.command, args.job_id)
+        if result.requested:
+            print(f"{args.command} requested for {args.job_id}; the running runner applies it")
+            return 0
+        if result.count == 0:
             print(f"nothing to {args.command} in {args.job_id}")
             return 0
-        print(f"re-queued {count} Documents of {args.job_id}", file=sys.stderr)
+        print(f"re-queued {result.count} Documents of {args.job_id}", file=sys.stderr)
         workers = WorkerSettings(args.ocr_workers, args.threads_per_worker)
-        return asyncio.run(_drive(ws, args.job_id, workers, make_classifier))
+        return backend.drive(args.job_id, workers, make_classifier)
 
 
 # records and export
@@ -398,41 +489,17 @@ def _records(args: argparse.Namespace) -> int:
     return 0
 
 
-def _export_lines(ws: Workspace, job_id: str, include_text: bool) -> Any:
-    with ws.read_job(job_id) as store:
-        for doc_id in store.states():
-            record = store.get_record(doc_id, include_text=include_text)
-            if record is not None:  # a running Job exports what is finished so far
-                yield record.model_dump_json(exclude_none=True)
-
-
 def _export(args: argparse.Namespace) -> int:
-    if args.server:
-        with ServerClient(args.server) as client:
-            lines = client.export(args.job_id, include_text=args.include_text)
-            return _write_lines(lines, args.output)
-    with open_workspace(args) as ws:
-        try:
-            ws.get_job(args.job_id)
-            manifest = ws.job_dir(args.job_id) / "manifest.json"
-            status = _write_lines(_export_lines(ws, args.job_id, args.include_text), args.output)
-        except KeyError:
-            raise CliError(f"no such Job: {args.job_id}") from None
-        if args.output is not None:
-            # The Job manifest goes beside the JSONL (spec §6).
-            beside = args.output.with_name(args.output.stem + ".manifest.json")
-            beside.write_text(manifest.read_text("utf-8"), encoding="utf-8")
-        return status
-
-
-def _write_lines(lines: Any, output: Path | None) -> int:
-    if output is None:
-        for line in lines:
-            print(line)
-        return 0
-    with output.open("w", encoding="utf-8") as out:
-        for line in lines:
-            out.write(line + "\n")
+    with open_backend(args) as backend:
+        lines = backend.export_lines(args.job_id, args.include_text)
+        if args.output is None:
+            for line in lines:
+                print(line)
+            return 0
+        with args.output.open("w", encoding="utf-8") as out:
+            for line in lines:
+                out.write(line + "\n")
+        write_manifest_beside(args.output, backend.manifest_text(args.job_id))
     return 0
 
 
@@ -455,7 +522,7 @@ def dispatch(args: argparse.Namespace, make_classifier: ClassifierFactory) -> in
             case "status":
                 return _status(args)
             case "jobs":
-                return list_jobs_command(args)
+                return _jobs(args)
             case "cancel":
                 return _cancel(args)
             case "resume" | "retry":
