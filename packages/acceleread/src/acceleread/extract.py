@@ -174,9 +174,7 @@ def extract_pdf(
             text = layer
             if ocr_needed:
                 started = time.perf_counter()
-                ocr = ocr or TesseractOcr(
-                    languages, [tessdata] if isinstance(tessdata, Path) else tessdata
-                )
+                ocr = ocr or TesseractOcr(languages, tessdata)
                 page = pdf[record.number - 1]
                 text, confidence = ocr.recognise(page)
                 page.close()
