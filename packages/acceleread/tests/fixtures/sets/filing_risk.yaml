@@ -1,0 +1,25 @@
+name: filing-risk
+version: 2
+taxonomy:
+  name: filing-type
+  categories:
+    - name: annual
+      description: A yearly report
+questions:
+  - name: going_concern
+    kind: noul
+    instructions: Does `document` raise substantial doubt about going concern?
+    reads: [controls, financial_statements]
+  - name: outlook
+    kind: score
+    instructions: How positive is the outlook in `document`?
+    criteria: [bleak, cautious, confident]
+    reads: [mdna]
+    fallback: head_tail
+    escalate_below: 0.6
+  - name: sector
+    kind: choice
+    instructions: Which sector is `document` about?
+    criteria:
+      - {name: energy, description: "Oil, gas and power"}
+      - {name: tech}
