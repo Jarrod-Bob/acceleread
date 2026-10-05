@@ -126,6 +126,15 @@ class RateLimitedClassifier:
     def ceiling(self) -> RateLimit:
         return self._ceiling
 
+    def update_ceiling(self, ceiling: RateLimit) -> None:
+        """Adopt a new ceiling, e.g. the limits a Classifier announces in its response headers.
+
+        The AIMD factor is kept, so a backoff in progress survives the update.
+        """
+        self._advance()
+        self._ceiling = ceiling
+        self._credit(0)  # clamp the buckets to the new rate
+
     @property
     def rate(self) -> RateLimit:
         """The effective rate right now, never above the ceiling."""

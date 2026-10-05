@@ -24,6 +24,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "anthropic", specifier = ">=0.40" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },

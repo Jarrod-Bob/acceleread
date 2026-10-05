@@ -9,6 +9,7 @@ acceleread-eval = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "anthropic>=0.40",  # the [llm] extra's SDK, so CI (no extras) tests the Claude Classifier
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=1.4.0",
