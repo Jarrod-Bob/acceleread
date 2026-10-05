@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 quality = [
     "docling-slim[convert-core,format-pdf,feat-ocr-rapidocr-onnx,models-local]>=2.133",
+    "huggingface_hub>=0.30",  # quality_models downloads the pinned weights with it directly
     # Direct so uv can pin them to the CPU-only index below (ADR 0005); pip users pass
     # --extra-index-url https://download.pytorch.org/whl/cpu.
     "torch>=2.6",

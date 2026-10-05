@@ -63,8 +63,8 @@ def test_doctor_reports_tesseract_packs_models_and_extras(
     assert report["tesseract"][0] == "ok" and report["tesseract"][1]
     assert report["language packs (vendored)"] == ("ok", "en")
     assert report["language packs (workspace)"] == ("ok", "fr")
-    assert report["models: Docling weights"][0] == "absent"
-    assert report["models: PP-OCR weights"][0] == "absent"
+    assert report["models: Docling layout"][0] == "absent"
+    assert report["models: RapidOCR (PP-OCR latin)"][0] == "absent"
     for extra in ("quality", "llm", "edgar"):
         assert report[f"extra [{extra}]"][0] in ("ok", "absent")
     assert report["offline mode"][0] == "ok"

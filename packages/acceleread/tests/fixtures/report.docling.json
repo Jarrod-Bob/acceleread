@@ -1,0 +1,418 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.10.0",
+  "name": "report",
+  "origin": {
+    "mimetype": "application/pdf",
+    "binary_hash": 17910178729307679671,
+    "filename": "report.pdf"
+  },
+  "furniture": {
+    "self_ref": "#/furniture",
+    "children": [],
+    "content_layer": "furniture",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      {
+        "$ref": "#/texts/0"
+      },
+      {
+        "$ref": "#/texts/1"
+      },
+      {
+        "$ref": "#/texts/2"
+      },
+      {
+        "$ref": "#/texts/3"
+      },
+      {
+        "$ref": "#/texts/4"
+      },
+      {
+        "$ref": "#/texts/5"
+      },
+      {
+        "$ref": "#/texts/6"
+      },
+      {
+        "$ref": "#/texts/7"
+      },
+      {
+        "$ref": "#/texts/8"
+      },
+      {
+        "$ref": "#/texts/9"
+      },
+      {
+        "$ref": "#/texts/10"
+      },
+      {
+        "$ref": "#/texts/11"
+      }
+    ],
+    "content_layer": "body",
+    "name": "_root_",
+    "label": "unspecified"
+  },
+  "groups": [],
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {
+            "l": 78.0,
+            "t": 708.924,
+            "r": 220.056,
+            "b": 692.274,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            16
+          ]
+        }
+      ],
+      "orig": "Item 1. Business",
+      "text": "Item 1. Business",
+      "level": 1
+    },
+    {
+      "self_ref": "#/texts/1",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {
+            "l": 78.0,
+            "t": 665.1800000000001,
+            "r": 532.0899999999999,
+            "b": 595.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            584
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {
+            "l": 78.0,
+            "t": 593.18,
+            "r": 532.0899999999999,
+            "b": 485.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            774
+          ]
+        }
+      ],
+      "orig": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue.",
+      "text": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue."
+    },
+    {
+      "self_ref": "#/texts/3",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {
+            "l": 78.0,
+            "t": 469.18,
+            "r": 532.0899999999999,
+            "b": 387.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            679
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue.",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue."
+    },
+    {
+      "self_ref": "#/texts/4",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "prov": [
+        {
+          "page_no": 2,
+          "bbox": {
+            "l": 78.0,
+            "t": 708.924,
+            "r": 261.06000000000006,
+            "b": 692.274,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            21
+          ]
+        }
+      ],
+      "orig": "Item 1A. Risk Factors",
+      "text": "Item 1A. Risk Factors",
+      "level": 1
+    },
+    {
+      "self_ref": "#/texts/5",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 2,
+          "bbox": {
+            "l": 78.0,
+            "t": 665.1800000000001,
+            "r": 532.0899999999999,
+            "b": 595.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            584
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional"
+    },
+    {
+      "self_ref": "#/texts/6",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 2,
+          "bbox": {
+            "l": 78.0,
+            "t": 593.18,
+            "r": 532.0899999999999,
+            "b": 411.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            877
+          ]
+        }
+      ],
+      "orig": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent",
+      "text": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent"
+    },
+    {
+      "self_ref": "#/texts/7",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 2,
+          "bbox": {
+            "l": 78.0,
+            "t": 469.18,
+            "r": 529.2999999999997,
+            "b": 387.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            576
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue.",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue."
+    },
+    {
+      "self_ref": "#/texts/8",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "section_header",
+      "prov": [
+        {
+          "page_no": 3,
+          "bbox": {
+            "l": 78.0,
+            "t": 708.924,
+            "r": 482.13599999999997,
+            "b": 692.274,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            44
+          ]
+        }
+      ],
+      "orig": "Item 7. Management's Discussion and Analysis",
+      "text": "Item 7. Management's Discussion and Analysis",
+      "level": 1
+    },
+    {
+      "self_ref": "#/texts/9",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 3,
+          "bbox": {
+            "l": 78.0,
+            "t": 665.1800000000001,
+            "r": 532.0899999999999,
+            "b": 595.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            584
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional"
+    },
+    {
+      "self_ref": "#/texts/10",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 3,
+          "bbox": {
+            "l": 78.0,
+            "t": 593.18,
+            "r": 532.0899999999999,
+            "b": 485.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            774
+          ]
+        }
+      ],
+      "orig": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue.",
+      "text": "installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue."
+    },
+    {
+      "self_ref": "#/texts/11",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "body",
+      "label": "text",
+      "prov": [
+        {
+          "page_no": 3,
+          "bbox": {
+            "l": 78.0,
+            "t": 469.18,
+            "r": 532.0899999999999,
+            "b": 387.93,
+            "coord_origin": "BOTTOMLEFT"
+          },
+          "charspan": [
+            0,
+            679
+          ]
+        }
+      ],
+      "orig": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue.",
+      "text": "Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue. Northwind Solar designs and manufactures photovoltaic panels and inverters for residential and commercial rooftops. We sell through independent installers in twelve states and operate two factories in Arizona. Our largest customers are regional installation companies, and no single customer accounted for more than ten percent of revenue."
+    }
+  ],
+  "pictures": [],
+  "tables": [],
+  "key_value_items": [],
+  "form_items": [],
+  "pages": {
+    "1": {
+      "size": {
+        "width": 612.0,
+        "height": 792.0
+      },
+      "page_no": 1
+    },
+    "2": {
+      "size": {
+        "width": 612.0,
+        "height": 792.0
+      },
+      "page_no": 2
+    },
+    "3": {
+      "size": {
+        "width": 612.0,
+        "height": 792.0
+      },
+      "page_no": 3
+    }
+  }
+}

@@ -34,6 +34,23 @@ jobs:
       - run: uv sync --locked --all-packages --python ${{ matrix.python }}
       - run: uv run pytest
 
+  quality:
+    # The `quality` Profile for real: Docling and RapidOCR with the pinned weights from
+    # `acceleread models fetch`, cached by the pins' file so a pin change refetches.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-packages --extra quality --python 3.12
+      - run: echo "ACCELEREAD_TEST_WORKSPACE=$RUNNER_TEMP/workspace" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/workspace/models
+          key: quality-models-${{ hashFiles('packages/acceleread/src/acceleread/quality_models.py') }}
+      - name: Fetch the pinned weights (hash-verified, so a cache hit is cheap)
+        run: uv run --no-sync acceleread --workspace "$ACCELEREAD_TEST_WORKSPACE" models fetch
+      - run: uv run --no-sync pytest packages/acceleread/tests/test_quality_extract.py packages/acceleread/tests/test_quality_models.py
+
   licences:
     # ADR 0003: every extra's resolved environment must stay within the allowlist.
     strategy:

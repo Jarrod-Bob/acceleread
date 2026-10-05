@@ -119,6 +119,12 @@ class ExtractTask:
     ocr_languages: tuple[str, ...] = ("en",)
     tessdata: tuple[Path, ...] = ()
     """Extra Tesseract pack directories (the Workspace's), searched after the vendored one."""
+    profile: Profile = "fast"
+    """The Extraction Profile for this Document: the Job's, or its per-Document override."""
+    workspace: Path | None = None
+    """The Workspace whose `models/` holds the `quality` Profile's weights."""
+    tables: bool = False
+    """`quality` only: run Docling's table structure model."""
 
     def for_pool(self) -> tuple[str, "ExtractTask"]:
         return "acceleread.workers:extract_document", self
@@ -130,6 +136,16 @@ def extract_document(task: ExtractTask, report: PageCountsCallback) -> Any:
 
     if task.format == "html":
         return extract_html(task.path)
+    if task.profile == "quality":
+        from acceleread.quality import extract_pdf_quality
+
+        return extract_pdf_quality(
+            task.path,
+            ocr_languages=task.ocr_languages,
+            workspace=task.workspace,
+            tables=task.tables,
+            on_page_counts=report,
+        )
     return extract_pdf(
         task.path,
         ocr_languages=task.ocr_languages,

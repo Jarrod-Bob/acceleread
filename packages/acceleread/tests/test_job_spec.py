@@ -93,3 +93,29 @@ def test_inputs_are_verbatim_strings_or_objects_with_ids_and_metadata() -> None:
     assert spec.inputs[0] == DocumentInput(source="https://example.test/a.pdf?x=1")
     assert spec.inputs[3].external_id == "ext-1" and spec.inputs[3].user_metadata == {"batch": 3}
     assert JobSpec.model_validate(spec.model_dump(mode="json")) == spec
+
+
+def test_tables_default_off_with_a_per_document_override() -> None:
+    spec = JobSpec(
+        inputs=[Path("a.pdf"), Path("b.pdf"), Path("c.pdf")],
+        extraction_profile="fast",
+        overrides={
+            "b.pdf": DocumentOverride(extraction_profile="quality", tables=True),
+            "c.pdf": DocumentOverride(extraction_profile="quality"),
+        },
+        tables=False,
+    )
+    assert JobSpec(inputs=[Path("a.pdf")]).tables is False
+    assert spec.tables_for("a.pdf") is False
+    assert spec.tables_for("b.pdf") is True
+    assert spec.tables_for("c.pdf") is False  # no override: the Job's setting
+
+
+def test_the_profile_for_a_document_is_its_override_or_the_jobs() -> None:
+    spec = JobSpec(
+        inputs=[Path("a.pdf"), Path("b.pdf")],
+        extraction_profile="fast",
+        overrides={"b.pdf": DocumentOverride(extraction_profile="quality")},
+    )
+    assert spec.profile_for("a.pdf") == "fast"
+    assert spec.profile_for(Path("b.pdf")) == "quality"

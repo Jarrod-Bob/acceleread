@@ -108,6 +108,19 @@ def _add_language(args: argparse.Namespace) -> int:
     return 0
 
 
+def _models_fetch(args: argparse.Namespace) -> int:
+    from acceleread.quality_models import ModelFetchError, fetch_models
+
+    try:
+        manifest = fetch_models(resolve_workspace_path(args.workspace), tables=args.tables)
+    except ModelFetchError as err:
+        print(f"acceleread: {err}", file=sys.stderr)
+        return 1
+    for name, entry in manifest.items():
+        print(f"fetched {name} ({entry['revision']}): {len(entry['files'])} files")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="acceleread")
     parser.add_argument("--version", action="version", version=f"acceleread {__version__}")
@@ -145,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_lang.add_argument("language", metavar="xx", help="ISO 639-1 code, such as de")
     add_lang.add_argument("--from-file", type=Path, help="install this .traineddata, no download")
+    models_cmd = commands.add_parser("models", help="manage the `quality` Profile's model weights")
+    models = models_cmd.add_subparsers(dest="models_command", required=True)
+    fetch_cmd = models.add_parser("fetch", help="download pinned Docling and PP-OCR weights")
+    fetch_cmd.add_argument(
+        "--tables", action="store_true", help="also fetch TableFormer, for `tables: true`"
+    )
     commands.add_parser("doctor", help="report Tesseract, language packs, models and extras")
 
     run_cmd = commands.add_parser("run", help="ingest Documents and print Records as JSONL")
@@ -161,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
         return _housekeeping(args)
     if args.command == "ocr":
         return _add_language(args)
+    if args.command == "models":
+        return _models_fetch(args)
     if args.command == "doctor":
         return _doctor(args)
     if args.command != "run":

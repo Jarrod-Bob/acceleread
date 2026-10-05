@@ -11,13 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from acceleread import quality_models
 from acceleread.extract import VENDORED_TESSDATA, tesseract_version
 from acceleread.languages import installed_languages, offline, workspace_tessdata
+from acceleread.quality_models import check_model
 
 Status = Literal["ok", "absent", "error"]
-# PROVISIONAL (#40, the `quality` Profile, owns the real layout): the Workspace `models/`
-# subdirectories and import names probed for Docling, PP-OCR and the `[quality]` extra.
-MODEL_DIRS = {"Docling weights": "docling", "PP-OCR weights": "ppocr"}
 EXTRAS = {"quality": ("docling", "rapidocr"), "llm": ("anthropic",), "edgar": ("edgar",)}
 
 
@@ -48,10 +47,17 @@ def _packs(workspace: Path, vendored_dir: Path) -> list[Check]:
 
 def _models(workspace: Path) -> list[Check]:
     checks = []
-    for label, directory in MODEL_DIRS.items():
-        found = (workspace / "models" / directory).is_dir()
-        detail = "installed" if found else "absent (optional, `quality` Profile)"
-        checks.append(Check(f"models: {label}", "ok" if found else "absent", detail))
+    for pin in quality_models.PINS:
+        state = check_model(workspace, pin)
+        hint = "`acceleread models fetch" + (" --tables`" if pin.optional else "`")
+        if state == "ok":
+            checks.append(Check(f"models: {pin.label}", "ok", "installed, hashes verified"))
+        elif state == "corrupt":
+            checks.append(
+                Check(f"models: {pin.label}", "error", f"damaged or incomplete; run {hint}")
+            )
+        else:
+            checks.append(Check(f"models: {pin.label}", "absent", f"absent ({hint})"))
     return checks
 
 

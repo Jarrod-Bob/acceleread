@@ -23,6 +23,7 @@ from lxml import html
 from acceleread.languages import TESSERACT_CODES, pack_file
 from acceleread.models import Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
+from acceleread.sections.detector import Heading
 
 PageCountsCallback = Callable[[int, int], None]
 """Called with (pages in the Document, pages that will be OCRed)."""
@@ -43,6 +44,8 @@ class Extracted:
     title: str | None
     ocr_pages: int = 0
     ocr_ms: int = 0
+    headings: tuple[Heading, ...] = ()
+    """Heading candidates with offsets into `text`: Docling `section_header` items (`quality`)."""
 
 
 def image_coverage(page: Any) -> float:
@@ -127,6 +130,39 @@ class TesseractOcr:
         self._cleanup.close()
 
 
+@dataclass(frozen=True)
+class PageLayer:
+    """One Page's pypdfium2 text layer and the OCR rule's verdict on it."""
+
+    record: Page
+    """The Page record, with `start` and `end` not yet placed."""
+    text: str
+    needs_ocr: bool
+
+
+def scan_pages(pdf: Any, step3: Step3Hook | None = None) -> list[PageLayer]:
+    """Every Page's text layer and OCR verdict, shared by both Profiles."""
+    layers: list[PageLayer] = []
+    for number, page in enumerate(pdf, start=1):
+        textpage = page.get_textpage()
+        layer = textpage.get_text_range().replace("\r\n", "\n").strip()
+        textpage.close()
+        signals = PageSignals(layer, image_coverage(page), path_count(page))
+        verdict = decide(signals, step3)
+        record = Page(
+            number=number,
+            start=0,
+            end=0,
+            engine="pdfium",
+            engine_version=str(pdfium.PDFIUM_INFO.build),
+            ocr_decision=verdict.decision,
+            image_coverage=signals.image_coverage,
+        )
+        layers.append(PageLayer(record, layer, verdict.ocr))
+        page.close()
+    return layers
+
+
 def extract_pdf(
     path: Path,
     ocr_languages: Sequence[str] = ("en",),
@@ -144,25 +180,8 @@ def extract_pdf(
     pdf = pdfium.PdfDocument(path)
     ocr: TesseractOcr | None = None
     try:
-        layers: list[tuple[Page, str, bool]] = []
-        for number, page in enumerate(pdf, start=1):
-            textpage = page.get_textpage()
-            layer = textpage.get_text_range().replace("\r\n", "\n").strip()
-            textpage.close()
-            signals = PageSignals(layer, image_coverage(page), path_count(page))
-            verdict = decide(signals, step3)
-            record = Page(
-                number=number,
-                start=0,
-                end=0,
-                engine="pdfium",
-                engine_version=str(pdfium.PDFIUM_INFO.build),
-                ocr_decision=verdict.decision,
-                image_coverage=signals.image_coverage,
-            )
-            layers.append((record, layer, verdict.ocr))
-            page.close()
-        flagged = sum(ocr_needed for _, _, ocr_needed in layers)
+        layers = scan_pages(pdf, step3)
+        flagged = sum(layer.needs_ocr for layer in layers)
         if on_page_counts is not None:
             on_page_counts(len(layers), flagged)
 
@@ -170,9 +189,9 @@ def extract_pdf(
         pages: list[Page] = []
         offset = 0
         ocr_ms = 0
-        for record, layer, ocr_needed in layers:
-            text = layer
-            if ocr_needed:
+        for layer in layers:
+            record, text = layer.record, layer.text
+            if layer.needs_ocr:
                 started = time.perf_counter()
                 ocr = ocr or TesseractOcr(languages, tessdata)
                 page = pdf[record.number - 1]
