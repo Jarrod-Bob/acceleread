@@ -65,6 +65,15 @@ def test_capabilities_declare_jev_limits() -> None:
     assert caps.token_budget == 32_000
 
 
+async def test_a_noul_with_low_probability_is_as_confident_as_its_complement() -> None:
+    answers = {"q": {"type": "noul", "noul": 0.1}, "r": {"type": "noul", "noul": 0.5}}
+    response = await jev(answering(answers)).judge(
+        {"document": {}}, {"q": Noul("?"), "r": Noul("?")}
+    )
+    assert response.results["q"].confidence == pytest.approx(0.9)
+    assert response.results["r"].confidence == 0.5
+
+
 async def test_judges_noul_score_and_choice_in_one_call() -> None:
     seen: list[dict[str, object]] = []
     answers = {
@@ -108,7 +117,7 @@ async def test_judges_noul_score_and_choice_in_one_call() -> None:
         "noul",
         0.97,
         None,
-        None,
+        0.97,  # max(p, 1 - p)
     )
     assert (score.kind, score.value, score.confidence) == ("score", 1.6, 0.8)
     assert score.probabilities == {"0": 0.1, "1": 0.3, "2": 0.6}

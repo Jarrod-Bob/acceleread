@@ -132,3 +132,10 @@ class ClassifierTokensExceeded(ClassifierError):
 
 class ClassifierRejected(ClassifierError):
     """The Classifier refused the request as invalid (422). The Job auto-cancels."""
+
+
+class ClassifierRefused(ClassifierError):
+    """The Classifier declined to answer on safety grounds, after any fallback also declined.
+
+    Not retried: the same request would be refused again.
+    """

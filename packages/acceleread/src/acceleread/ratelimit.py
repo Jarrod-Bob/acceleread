@@ -98,9 +98,11 @@ class RateLimitedClassifier:
         *,
         clock: Clock | None = None,
         max_unavailable_tries: int = MAX_UNAVAILABLE_TRIES,
+        user_set: bool = False,
     ) -> None:
         self._inner = inner
         self._ceiling = ceiling
+        self._user_set = user_set  # a `classifier.rate_limit` override: headers can't raise it
         self._clock: Clock = clock or MonotonicClock()
         self._max_unavailable_tries = max_unavailable_tries
         now = self._clock.now()
@@ -125,6 +127,22 @@ class RateLimitedClassifier:
     @property
     def ceiling(self) -> RateLimit:
         return self._ceiling
+
+    def update_ceiling(self, ceiling: RateLimit) -> None:
+        """Adopt a new ceiling, e.g. the limits a Classifier announces in its response headers.
+
+        The AIMD factor is kept, so a backoff in progress survives the update. A user-set ceiling
+        is only ever lowered by it, never raised.
+        """
+        self._advance()
+        if self._user_set:
+            ceiling = RateLimit(
+                min(ceiling.tokens_per_s, self._ceiling.tokens_per_s),
+                min(ceiling.requests_per_s, self._ceiling.requests_per_s),
+                self._ceiling.max_in_flight,
+            )
+        self._ceiling = ceiling
+        self._credit(0)  # clamp the buckets to the new rate
 
     @property
     def rate(self) -> RateLimit:

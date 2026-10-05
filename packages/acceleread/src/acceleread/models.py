@@ -361,6 +361,10 @@ class Usage(BaseModel):
     ocr_pages: int = 0
     cache_hits: int = 0
 
+    def add(self, other: "Usage") -> None:
+        for name in type(self).model_fields:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
 
 class Timings(BaseModel):
     queued_ms: int = 0

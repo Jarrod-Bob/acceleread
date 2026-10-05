@@ -31,7 +31,7 @@ quality = [
     "torch>=2.6",
     "torchvision>=0.21",
 ]
-llm = ["anthropic>=0.40"]
+llm = ["anthropic>=1.0"]  # 1.0 moved to httpx2; fallbacks "default" arrived in 0.120
 edgar = ["edgartools==5.60.0"]
 all = ["acceleread[quality,llm,edgar]"]
 

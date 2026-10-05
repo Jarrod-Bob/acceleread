@@ -70,6 +70,7 @@ class JudgmentSpec:
     reads: tuple[str, ...] | None = None  # canonical Section keys; None reads the whole Document
     fallback: bool = False  # read head+tail when a Section is missing (always, for the Taxonomy)
     is_taxonomy: bool = False
+    escalate_below: float | None = None  # confidence under which the Judgment is flagged (§5.5)
 
     @property
     def wire_name(self) -> str:
@@ -106,7 +107,16 @@ def question_ask(question: Question) -> Ask:
             return Choice(question.instructions, {c.name: c.description for c in question.criteria})
 
 
-def judgment_specs(taxonomy: Taxonomy | None, questions: Sequence[Question]) -> list[JudgmentSpec]:
+def _threshold(own: float | None, job: float | None) -> float | None:
+    return job if own is None else own
+
+
+def judgment_specs(
+    taxonomy: Taxonomy | None,
+    questions: Sequence[Question],
+    escalate_below: float | None = None,
+) -> list[JudgmentSpec]:
+    """The Judgments to plan. `escalate_below` is the Job's default, used where one sets none."""
     specs: list[JudgmentSpec] = []
     if taxonomy is not None:
         specs.append(
@@ -116,11 +126,21 @@ def judgment_specs(taxonomy: Taxonomy | None, questions: Sequence[Question]) -> 
                 tuple(taxonomy.reads) if taxonomy.reads else None,
                 fallback=True,
                 is_taxonomy=True,
+                escalate_below=_threshold(taxonomy.escalate_below, escalate_below),
             )
         )
     for q in questions:
         reads = tuple(q.reads) if q.reads else None
-        specs.append(JudgmentSpec(q.name, question_ask(q), reads, fallback=q.fallback is not None))
+        threshold = _threshold(q.escalate_below, escalate_below)
+        specs.append(
+            JudgmentSpec(
+                q.name,
+                question_ask(q),
+                reads,
+                fallback=q.fallback is not None,
+                escalate_below=threshold,
+            )
+        )
     return specs
 
 
