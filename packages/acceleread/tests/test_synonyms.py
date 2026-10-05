@@ -75,7 +75,7 @@ def test_matched_headings_become_sections_running_to_the_next_heading() -> None:
     assert text[business.spans[0].start : business.spans[0].end].endswith(BODY.strip())
     assert "Our people" not in text[business.spans[0].start : business.spans[0].end]
     assert text[risk.spans[0].start : risk.spans[0].end].endswith(BODY.strip())
-    assert risk.confidence is not None and risk.confidence < 0.9
+    assert risk.confidence is not None and 0.5 <= risk.confidence < 0.9
 
 
 def test_a_key_can_have_several_sections() -> None:

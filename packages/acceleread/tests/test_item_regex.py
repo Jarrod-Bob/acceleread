@@ -113,7 +113,7 @@ def test_in_text_references_to_items_are_not_headings() -> None:
 
 def test_confidence_is_set_and_below_the_verification_skip_threshold() -> None:
     sections = detect(TEN_K)
-    assert all(s.confidence is not None and 0 < s.confidence < 0.9 for s in sections)
+    assert all(s.confidence is not None and 0.5 <= s.confidence < 0.9 for s in sections)
 
 
 def test_10q_items_are_qualified_by_their_part() -> None:
