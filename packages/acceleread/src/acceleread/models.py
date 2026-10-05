@@ -230,11 +230,17 @@ class ClassifierInfo(BaseModel):
     version: str
 
 
+class Span(BaseModel):
+    start: int
+    end: int
+
+
 class Coverage(BaseModel):
     """The part of a Document a single Judgment read."""
 
     sections: list[str] = Field(default_factory=list)
-    page_ranges: list[tuple[int, int]] = Field(default_factory=list)
+    spans: list[Span] = Field(default_factory=list)  # exact character offsets read
+    page_ranges: list[tuple[int, int]] = Field(default_factory=list)  # Pages those spans touch
     truncated: bool = False
     shrunk: bool = False
     est_tokens: int
@@ -301,11 +307,6 @@ class Page(BaseModel):
     ocr_confidence: float | None = None
     ocr_decision: OcrDecision | None = None
     image_coverage: float | None = None
-
-
-class Span(BaseModel):
-    start: int
-    end: int
 
 
 class Verification(BaseModel):

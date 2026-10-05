@@ -5,6 +5,7 @@ A Classifier answers a set of named Judgments about one state. Planning (groupin
 Coverage, caching, Escalation) lives above this seam, so implementations stay small.
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -49,6 +50,31 @@ class Capabilities:
     max_choice_options: int
     token_budget: int  # state plus the longest Judgment
     chars_per_token: float  # conservative estimate used before sending
+    request_overhead_tokens: int = 0  # fixed cost the Classifier adds to every request
+    model: str = ""  # the model version, part of every Judgment cache key
+
+
+def ask_chars(ask: Ask) -> int:
+    chars = len(ask.instructions)
+    match ask:
+        case Score(criteria=criteria):
+            chars += sum(len(c) for c in criteria)
+        case Choice(options=options):
+            chars += sum(len(k) + len(v or "") for k, v in options.items())
+    return chars
+
+
+def estimate_tokens(
+    state: JSONState, judgments: Mapping[str, Ask], capabilities: Capabilities
+) -> float:
+    """The one token estimate, shared by the Planner's budget and the rate limiter's charge.
+
+    Characters of state plus each Judgment's instructions and criteria, divided by the
+    Classifier's chars-per-token, plus its fixed per-request overhead.
+    """
+    chars = len(json.dumps(state, separators=(",", ":"), ensure_ascii=False))
+    chars += sum(ask_chars(ask) for ask in judgments.values())
+    return chars / capabilities.chars_per_token + capabilities.request_overhead_tokens
 
 
 @dataclass(frozen=True)
@@ -85,6 +111,13 @@ class ClassifierTransient(ClassifierError):
 
 class ClassifierUnavailable(ClassifierError):
     """A server-side failure (5xx). Persistent ones fail the Document."""
+
+
+class ClassifierTokensExceeded(ClassifierError):
+    """The state was over the Classifier's token limit (400 `max_tokens_exceeded`).
+
+    The Planner shrinks the state and retries once; the rate limiter does not retry it.
+    """
 
 
 class ClassifierRejected(ClassifierError):
