@@ -277,15 +277,15 @@ class SkippedAnswer(BaseModel):
 
 
 class OcrDecision(BaseModel):
-    """Why the OCR rule sent a Page to OCR or kept its text layer (spec §4.2)."""
+    """Why the OCR rule sent a Page to OCR or kept its text layer (spec §4.2, §6)."""
 
     step: int
     reason: str
     chars: int
     word_ratio: float | None = None
-    bad_char_ratio: float | None = None
-    image_coverage: float | None = None
-    path_count: int | None = None
+    bad_char_ratio: float
+    image_coverage: float
+    path_count: int
     jev_real_words: float | None = None
     jev_skipped: bool = False
 
