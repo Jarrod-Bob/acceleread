@@ -124,7 +124,11 @@ def _result(answer: ts.Answer) -> JudgmentResult:
                 confidence=answer.confidence,
             )
         case ts.NoulAnswer():
-            return JudgmentResult(kind="noul", value=answer.noul)
+            # A Noul is one probability; how sure Jev is of its side is max(p, 1 - p), so Noul
+            # Questions can be flagged and escalated like Score and Choice.
+            return JudgmentResult(
+                kind="noul", value=answer.noul, confidence=max(answer.noul, 1 - answer.noul)
+            )
     raise TypeError(f"unsupported answer: {answer!r}")
 
 

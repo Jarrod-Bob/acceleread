@@ -213,7 +213,11 @@ def test_escalation_max_is_a_share_of_the_jobs_documents() -> None:
 
 def test_the_default_escalation_max_is_two_percent() -> None:
     assert EscalationBudget(total_documents=100).cap == 2
-    assert EscalationBudget(total_documents=10).cap == 0  # rounds down; see the PR notes
+    assert EscalationBudget(total_documents=10).cap == 1  # rounds up: one Document at least
+    assert EscalationBudget(total_documents=50).cap == 1
+    assert EscalationBudget(total_documents=51).cap == 2
+    assert EscalationBudget(total_documents=100, escalation_max=0.07).cap == 7  # no float spill
+    assert EscalationBudget(total_documents=100, escalation_max=0).cap == 0
 
 
 async def test_past_the_cap_judgments_are_only_flagged() -> None:

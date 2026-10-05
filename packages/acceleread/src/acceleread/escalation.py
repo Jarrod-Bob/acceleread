@@ -23,7 +23,7 @@ from acceleread.models import (
 from acceleread.planner import DocumentView, JudgmentSpec, Outcome, judge_document
 from acceleread.workspace.cache import JudgmentCache
 
-_EPSILON = 1e-9  # so 200 documents at 0.5% is exactly one, not 0.999…
+_EPSILON = 1e-9  # so 100 documents at 7% is exactly seven, not eight
 
 
 @dataclass
@@ -32,7 +32,8 @@ class EscalationBudget:
 
     A Document takes one slot however many of its Judgments escalate, and a failed escalation
     keeps its slot. A Document whose escalation was answered wholly from the Judgment cache gives
-    its slot back: it cost nothing. The cap rounds down.
+    its slot back: it cost nothing. The cap rounds up, so any `escalation_max` above 0 allows at
+    least one Document.
     One budget is shared by every Document of a Job; `claim` never awaits, so concurrent
     Documents cannot overspend it.
     """
@@ -49,7 +50,7 @@ class EscalationBudget:
 
     @property
     def cap(self) -> int:
-        return math.floor(self.total_documents * self.escalation_max + _EPSILON)
+        return math.ceil(self.total_documents * self.escalation_max - _EPSILON)
 
     def claim(self) -> bool:
         if self.escalated >= self.cap:
