@@ -21,8 +21,9 @@ import pypdfium2.raw as pdfium_raw
 from lxml import html
 
 from acceleread.languages import TESSERACT_CODES, pack_file
-from acceleread.models import Page
+from acceleread.models import ExtractionProfile, JobSettings, Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
+from acceleread.sections.detector import Heading
 
 PageCountsCallback = Callable[[int, int], None]
 """Called with (pages in the Document, pages that will be OCRed)."""
@@ -43,6 +44,8 @@ class Extracted:
     title: str | None
     ocr_pages: int = 0
     ocr_ms: int = 0
+    headings: tuple[Heading, ...] = ()
+    """Heading candidates with offsets into `text`: Docling `section_header` items (`quality`)."""
 
 
 def image_coverage(page: Any) -> float:
@@ -127,6 +130,38 @@ class TesseractOcr:
         self._cleanup.close()
 
 
+def scan_pages(pdf: Any, step3: Step3Hook | None = None) -> list[tuple[Page, str, bool]]:
+    """Each Page's pypdfium2 text layer and the OCR rule's verdict, shared by both Profiles.
+
+    Returns (Page record with `start`/`end` still 0, text layer, whether the rule flags the Page).
+    """
+    layers: list[tuple[Page, str, bool]] = []
+    for number, page in enumerate(pdf, start=1):
+        textpage = page.get_textpage()
+        layer = textpage.get_text_range().replace("\r\n", "\n").strip()
+        textpage.close()
+        signals = PageSignals(layer, image_coverage(page), path_count(page))
+        verdict = decide(signals, step3)
+        record = Page(
+            number=number,
+            start=0,
+            end=0,
+            engine="pdfium",
+            engine_version=str(pdfium.PDFIUM_INFO.build),
+            ocr_decision=verdict.decision,
+            image_coverage=signals.image_coverage,
+        )
+        layers.append((record, layer, verdict.ocr))
+        page.close()
+    return layers
+
+
+def profile_for(settings: JobSettings, source: str | Path) -> ExtractionProfile:
+    """The Extraction Profile for one input: its override when it has one, else the Job's."""
+    override = settings.overrides.get(str(source))
+    return (override.extraction_profile if override else None) or settings.extraction_profile
+
+
 def extract_pdf(
     path: Path,
     ocr_languages: Sequence[str] = ("en",),
@@ -144,24 +179,7 @@ def extract_pdf(
     pdf = pdfium.PdfDocument(path)
     ocr: TesseractOcr | None = None
     try:
-        layers: list[tuple[Page, str, bool]] = []
-        for number, page in enumerate(pdf, start=1):
-            textpage = page.get_textpage()
-            layer = textpage.get_text_range().replace("\r\n", "\n").strip()
-            textpage.close()
-            signals = PageSignals(layer, image_coverage(page), path_count(page))
-            verdict = decide(signals, step3)
-            record = Page(
-                number=number,
-                start=0,
-                end=0,
-                engine="pdfium",
-                engine_version=str(pdfium.PDFIUM_INFO.build),
-                ocr_decision=verdict.decision,
-                image_coverage=signals.image_coverage,
-            )
-            layers.append((record, layer, verdict.ocr))
-            page.close()
+        layers = scan_pages(pdf, step3)
         flagged = sum(ocr_needed for _, _, ocr_needed in layers)
         if on_page_counts is not None:
             on_page_counts(len(layers), flagged)

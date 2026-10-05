@@ -87,3 +87,32 @@ def test_toc_duplicates_are_resolved_by_the_default_selection() -> None:
     found = detect_sections(DetectionInput(text=text, form="10-K"))
     assert [s.form_ref for s in found] == ["10-K 1", "10-K 1A"]
     assert found[0].spans[0].start >= len(toc)
+
+
+def test_merge_mode_combines_item_regex_and_heading_sections() -> None:
+    """The `quality` Profile: Item regex Sections plus Docling `section_header` Sections (§4.4)."""
+    text = f"Item 1A. Risk Factors\n{BODY}\nFinancial review\n{BODY}\n"
+    headings = [Heading("Financial review", text.index("Financial review"))]
+    inp = DetectionInput(text=text, form="10-K", headings=headings)
+
+    assert [s.method for s in detect_sections(inp)] == ["item_regex"]  # the chain stops at one
+    merged = detect_sections(inp, merge=True)
+    assert [(s.method, s.keys) for s in merged] == [
+        ("item_regex", ["risk_factors"]),
+        ("heading_synonym", ["mdna"]),
+    ]
+
+
+def test_merge_mode_keeps_every_detectors_sections_in_document_order() -> None:
+    late = Section(keys=["mdna"], label="m", spans=[Span(start=50, end=90)], method="late")
+    detectors = [StubDetector("a", [late]), StubDetector("b", [a_section("business")])]
+    found = detect_sections(DetectionInput(text="x" * 100), detectors, merge=True)
+    assert [s.keys for s in found] == [["business"], ["mdna"]]
+
+
+def test_merge_mode_drops_an_identical_section_found_twice() -> None:
+    same = a_section("business")
+    twin = same.model_copy(update={"method": "other"})
+    detectors = [StubDetector("a", [same]), StubDetector("b", [twin])]
+    found = detect_sections(DetectionInput(text="x" * 100), detectors, merge=True)
+    assert [s.method for s in found] == ["stub"]  # the earlier detector's wins
