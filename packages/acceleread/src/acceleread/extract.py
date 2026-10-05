@@ -78,7 +78,8 @@ def path_count(page: Any) -> int:
 def tesseract_version() -> str:
     import tesserocr
 
-    return tesserocr.tesseract_version().splitlines()[0].removeprefix("tesseract ")
+    version: str = tesserocr.tesseract_version()
+    return version.splitlines()[0].removeprefix("tesseract ")
 
 
 def _tesseract_packs(languages: Sequence[str], tessdata: Sequence[Path]) -> dict[str, Path]:
