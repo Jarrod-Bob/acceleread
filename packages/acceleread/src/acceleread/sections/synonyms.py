@@ -10,12 +10,9 @@ module.
 
 import re
 from collections.abc import Sequence
-from pathlib import Path
 
-import pypdfium2 as pdfium
-
-from acceleread.models import Page, Section, Span
-from acceleread.sections.detector import DetectionInput, Heading, estimate_tokens
+from acceleread.models import Section, Span
+from acceleread.sections.detector import DetectionInput, Heading, estimate_tokens, trim_end
 
 METHOD = "heading_synonym"
 CONFIDENCE = 0.7
@@ -97,9 +94,11 @@ class SynonymDetector:
 
     def detect(self, inp: DetectionInput) -> list[Section]:
         headings, from_lines = _candidates(inp)
+        # Only top-level headings name Sections; deeper ones just don't end them.
+        top = min((h.level for h in headings), default=0)
         sections = []
         for i, heading in enumerate(headings):
-            key = match_key(heading.text)
+            key = match_key(heading.text) if heading.level == top else None
             if key is None:
                 continue
             # A section runs to the next heading at its own level or higher.
@@ -108,8 +107,10 @@ class SynonymDetector:
                 if later.level <= heading.level:
                     end = later.start
                     break
-            end = len(inp.text[:end].rstrip())
-            if from_lines and end - heading.start < MIN_LINE_SECTION_CHARS:
+            end = trim_end(inp.text, heading.start, end)
+            if end <= heading.start or (
+                from_lines and end - heading.start < MIN_LINE_SECTION_CHARS
+            ):
                 continue
             sections.append(
                 Section(
@@ -122,39 +123,3 @@ class SynonymDetector:
                 )
             )
         return sections
-
-
-OutlineEntry = tuple[int, str, int]
-"""(level from 0, title, zero-based page index), as the PDF outline lists them."""
-
-
-def pdf_outline(path: Path) -> list[OutlineEntry]:
-    """The PDF's bookmarks, flattened. Empty when it has none."""
-    pdf = pdfium.PdfDocument(path)
-    try:
-        return [
-            (item.level, item.title, item.page_index)
-            for item in pdf.get_toc()
-            if item.page_index is not None
-        ]
-    finally:
-        pdf.close()
-
-
-def outline_headings(
-    outline: Sequence[OutlineEntry], pages: Sequence[Page], text: str
-) -> list[Heading]:
-    """Outline entries as headings, positioned where the title appears on its Page.
-
-    An entry whose title can't be found on the Page starts at the Page's start; one that points
-    past the extracted Pages is dropped.
-    """
-    by_index = {p.number - 1: p for p in pages}
-    headings = []
-    for level, title, page_index in outline:
-        page = by_index.get(page_index)
-        if page is None:
-            continue
-        at = text.find(title, page.start, page.end)
-        headings.append(Heading(title, at if at >= 0 else page.start, level))
-    return headings

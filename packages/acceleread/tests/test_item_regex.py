@@ -4,6 +4,7 @@
 from acceleread.models import Section
 from acceleread.sections.detector import DetectionInput
 from acceleread.sections.item_regex import ItemRegexDetector
+from acceleread.sections.selection import longest_per_ref
 
 BODY = "Revenue grew and margins held across every segment of the company. " * 6
 
@@ -86,12 +87,20 @@ def test_est_tokens_follows_the_span_length() -> None:
     assert risk.est_tokens == round((span.end - span.start) / 3.0)
 
 
-def test_table_of_contents_entries_lose_to_the_real_headings() -> None:
-    toc = "TABLE OF CONTENTS\nItem 1. Business 3\nItem 1A. Risk Factors 9\nItem 7. MD&A 30\n"
-    text = toc + TEN_K
-    sections = by_ref(detect(text))
-    assert len(detect(text)) == 6
-    assert span_text(text, sections["10-K 1A"]).count("Revenue grew") == 6
+TOC = "TABLE OF CONTENTS\nItem 1. Business 3\nItem 1A. Risk Factors 9\nItem 7. MD&A 30\n"
+
+
+def test_every_candidate_is_returned_including_table_of_contents_entries() -> None:
+    sections = detect(TOC + TEN_K)
+    assert len(sections) == 9
+    assert [s.form_ref for s in sections].count("10-K 1A") == 2
+
+
+def test_table_of_contents_entries_lose_to_the_real_headings_after_selection() -> None:
+    text = TOC + TEN_K
+    chosen = longest_per_ref(detect(text))
+    assert len(chosen) == 6
+    assert span_text(text, by_ref(chosen)["10-K 1A"]).count("Revenue grew") == 6
 
 
 def test_letter_spaced_headings_are_found() -> None:
@@ -164,9 +173,50 @@ def test_20f_items_and_the_risk_factors_subheading() -> None:
     assert sections["20-F 16K"].keys == ["cybersecurity"]
 
 
-def test_unknown_or_missing_form_yields_nothing() -> None:
-    assert detect(TEN_K, form=None) == []
+def test_unknown_form_yields_nothing() -> None:
     assert detect(TEN_K, form="S-1") == []
+    assert detect("FORM S-1\n" + TEN_K, form="S-1") == []
+
+
+def test_a_missing_form_is_inferred_from_the_cover_page() -> None:
+    cover = "UNITED STATES SECURITIES AND EXCHANGE COMMISSION\nFORM 10-K\nACME CORP\n"
+    assert detect(cover + TEN_K, form=None)[0].form_ref == "10-K 1"
+    assert detect("FORM 20-F\n" + TEN_K, form=None)[0].form_ref == "20-F 1"
+    assert detect("F O R M 10-Q\n" + TEN_K, form=None) != []
+
+
+def test_a_missing_form_with_no_cover_form_yields_nothing() -> None:
+    assert detect(TEN_K, form=None) == []
+
+
+def test_wrapped_body_text_starting_with_item_is_not_a_heading() -> None:
+    text = f"Item 1. Business\n{BODY}\nItem 7 of this report discusses things\n{BODY}\n"
+    assert [s.form_ref for s in detect(text)] == ["10-K 1"]
+
+
+def test_combined_headings_are_case_insensitive_with_word_boundaries() -> None:
+    text = (
+        f"Items 1 AND 3. Business\n{BODY}\nItems 7 & 7A. MD&A\n{BODY}\nItem 15 Exhibits\n{BODY}\n"
+    )
+    first, second, _ = detect(text)
+    assert first.keys == ["business", "legal_proceedings"]
+    assert second.keys == ["mdna", "market_risk"]
+
+
+def test_20f_multi_level_refs() -> None:
+    text = f"Item 8.A.7 Legal Proceedings\n{BODY}\nItem 9. The Offer\n{BODY}\n"
+    sections = detect(text, form="20-F")
+    assert sections[0].form_ref == "20-F 8.A.7"
+    assert sections[0].keys == ["legal_proceedings"]
+
+
+def test_a_huge_document_is_scanned_quickly() -> None:
+    import time
+
+    text = "".join(f"Item {i % 15 + 1}. Heading\n{BODY}\n" for i in range(6000))
+    started = time.perf_counter()
+    detect(text)
+    assert time.perf_counter() - started < 5
 
 
 def test_text_without_items_yields_nothing() -> None:

@@ -80,3 +80,28 @@ def test_form_variants_use_the_base_forms_mapping() -> None:
 
 def test_item_numbers_are_case_insensitive() -> None:
     assert keys_for_item("10-K", "1a") == ["risk_factors"]
+
+
+def test_merge_keys_dedupes_and_drops_other_beside_a_canonical_key() -> None:
+    from acceleread.sections.keys import merge_keys
+
+    assert merge_keys("10-K", ["1B", "1C"]) == ["cybersecurity"]
+    assert merge_keys("10-K", ["1", "3"]) == ["business", "legal_proceedings"]
+    assert merge_keys("10-K", ["2"]) == ["other"]
+    assert merge_keys("10-K", []) == ["other"]
+
+
+def test_qualify_ref_adds_the_part_for_10q_only() -> None:
+    from acceleread.sections.keys import qualify_ref
+
+    assert qualify_ref("10-Q", "II", "1A") == "II.1A"
+    assert qualify_ref("10-K", "II", "7") == "7"
+    assert qualify_ref("10-Q", "", "1") == "1"
+
+
+def test_undeclared_keys_become_other() -> None:
+    from acceleread.sections.keys import enforce_keys
+
+    assert enforce_keys(["business", "esg"], frozenset()) == ["business"]
+    assert enforce_keys(["esg"], frozenset()) == ["other"]
+    assert enforce_keys(["esg", "business"], frozenset({"esg"})) == ["esg", "business"]

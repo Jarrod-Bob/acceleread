@@ -44,5 +44,12 @@ class SectionDetector(Protocol):
     def detect(self, inp: DetectionInput) -> list[Section]: ...
 
 
+def trim_end(text: str, start: int, end: int) -> int:
+    """`end` moved back over trailing whitespace, never past `start`."""
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return end
+
+
 def estimate_tokens(chars: int) -> int:
     return round(chars / CHARS_PER_TOKEN)

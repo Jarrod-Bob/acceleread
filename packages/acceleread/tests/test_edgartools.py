@@ -150,3 +150,14 @@ def test_real_edgartools_finds_items_in_html() -> None:
     risk = found[1]
     assert text[risk.spans[0].start : risk.spans[0].end].startswith("Item 1A. Risk Factors")
     assert "Revenue went up" not in text[risk.spans[0].start : risk.spans[0].end]
+
+
+def test_sections_out_of_document_order_are_still_all_found_in_order() -> None:
+    first = FakeSection("Item 1. Business", BODY, item="1")
+    second = FakeSection("Item 1A. Risk Factors", BODY + "More.", item="1A")
+    third = FakeSection("Item 7. MD&A", BODY + "Other.", item="7")
+    text = document_text(first, second, third)
+    found = detector(third, first, second).detect(
+        DetectionInput(text=text, form="10-K", html="<html/>")
+    )
+    assert [s.form_ref for s in found] == ["10-K 1", "10-K 1A", "10-K 7"]

@@ -71,3 +71,19 @@ def test_pointer_sections_come_back_flagged() -> None:
     found = detect_sections(DetectionInput(text=text, form="10-K"))
     flags = {s.form_ref: s.flags for s in found}
     assert flags == {"10-K 1": [], "10-K 7": ["pointer"], "10-K 8": []}
+
+
+def test_keys_a_detector_did_not_declare_become_other() -> None:
+    plain = StubDetector("plain", [a_section("esg")])
+    assert detect_sections(DetectionInput(text="hello"), [plain])[0].keys == ["other"]
+    declaring = StubDetector("declaring", [a_section("esg")])
+    declaring.extra_keys = frozenset({"esg"})
+    assert detect_sections(DetectionInput(text="hello"), [declaring])[0].keys == ["esg"]
+
+
+def test_toc_duplicates_are_resolved_by_the_default_selection() -> None:
+    toc = "Item 1. Business 3\nItem 1A. Risk Factors 9\n"
+    text = f"{toc}Item 1. Business\n{BODY}\nItem 1A. Risk Factors\n{BODY}\n"
+    found = detect_sections(DetectionInput(text=text, form="10-K"))
+    assert [s.form_ref for s in found] == ["10-K 1", "10-K 1A"]
+    assert found[0].spans[0].start >= len(toc)

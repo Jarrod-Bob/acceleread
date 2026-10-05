@@ -14,7 +14,7 @@ from typing import Any
 
 from acceleread.models import Section, Span
 from acceleread.sections.detector import DetectionInput, estimate_tokens
-from acceleread.sections.keys import OTHER, base_form, keys_for_item
+from acceleread.sections.keys import base_form, merge_keys, qualify_ref
 
 METHOD = "edgartools"
 _ANCHOR_WORDS = 8
@@ -57,9 +57,7 @@ def _locate(text: str, section_text: str, cursor: int) -> tuple[int, int] | None
 
 def _refs(section: Any, form: str) -> list[str]:
     items = list(section.covered_items or ([section.item] if section.item else []))
-    if base_form(form) == "10-Q" and section.part:
-        return [f"{section.part}.{item}" for item in items]
-    return [str(item) for item in items]
+    return [qualify_ref(form, section.part or "", str(item)) for item in items]
 
 
 class EdgarDetector:
@@ -77,20 +75,19 @@ class EdgarDetector:
         sections: list[Section] = []
         cursor = 0
         for source in document.sections.values():
-            located = _locate(inp.text, source.text(), cursor)
+            # Prefer the match after the previous Section, but never lose a Section because an
+            # earlier one matched out of place or edgartools listed them out of order.
+            located = _locate(inp.text, source.text(), cursor) or _locate(
+                inp.text, source.text(), 0
+            )
             if located is None:
                 continue
             start, end = located
             cursor = end
             refs = _refs(source, form)
-            keys: list[str] = []
-            for ref in refs:
-                keys += [k for k in keys_for_item(form, ref) if k not in keys]
-            if len(keys) > 1 and OTHER in keys:
-                keys.remove(OTHER)
             sections.append(
                 Section(
-                    keys=keys or [OTHER],
+                    keys=merge_keys(form, refs),
                     label=source.title,
                     form_ref=f"{form} {', '.join(refs)}" if refs else None,
                     spans=[Span(start=start, end=end)],
@@ -99,4 +96,4 @@ class EdgarDetector:
                     est_tokens=estimate_tokens(end - start),
                 )
             )
-        return sections
+        return sorted(sections, key=lambda s: s.spans[0].start)

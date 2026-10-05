@@ -125,35 +125,24 @@ def test_short_lines_inside_a_section_do_not_end_it() -> None:
     assert "Revenue up 4%" in text[section.spans[0].start : section.spans[0].end]
 
 
-def test_outline_entries_become_top_level_headings_at_their_page() -> None:
-    from acceleread.models import Page
-    from acceleread.sections.synonyms import outline_headings
-
-    text = "cover\n\nBusiness overview\nwe sell\n\nNotes\nmore"
-    pages = [
-        Page(number=1, start=0, end=5),
-        Page(number=2, start=7, end=32),
-        Page(number=3, start=34, end=len(text)),
-    ]
-    outline = [(0, "Business overview", 1), (1, "Sub topic", 1), (0, "Notes", 2)]
-    headings = outline_headings(outline, pages, text)
-    assert headings == [
-        Heading("Business overview", text.index("Business overview"), 0),
-        Heading("Sub topic", pages[1].start, 1),
-        Heading("Notes", text.index("Notes"), 0),
-    ]
+def test_only_top_level_headings_are_matched() -> None:
+    text = f"Strategic report\n{BODY}\nLitigation\n{BODY}\n"
+    headings = [Heading("Strategic report", 0, 0), Heading("Litigation", text.index("Lit"), 1)]
+    sections = SynonymDetector().detect(DetectionInput(text=text, headings=headings))
+    assert [s.keys for s in sections] == [["business"]]
 
 
-def test_outline_entries_pointing_past_the_pages_are_dropped() -> None:
-    from acceleread.models import Page
-    from acceleread.sections.synonyms import outline_headings
+def test_a_heading_list_whose_top_level_is_one_is_still_matched() -> None:
+    text = f"Strategic report\n{BODY}\n"
+    sections = SynonymDetector().detect(
+        DetectionInput(text=text, headings=[Heading("Strategic report", 0, 1)])
+    )
+    assert [s.keys for s in sections] == [["business"]]
 
-    assert outline_headings([(0, "Gone", 9)], [Page(number=1, start=0, end=3)], "abc") == []
 
-
-def test_a_pdf_without_bookmarks_has_an_empty_outline() -> None:
-    from pathlib import Path
-
-    from acceleread.sections.synonyms import pdf_outline
-
-    assert pdf_outline(Path(__file__).parent / "fixtures" / "sample.pdf") == []
+def test_headings_sharing_a_start_never_produce_an_inverted_span() -> None:
+    text = f"Strategic report {BODY}"
+    headings = [Heading("Principal risks", 0), Heading("Strategic report", 0)]
+    sections = SynonymDetector().detect(DetectionInput(text=text, headings=headings))
+    assert all(s.spans[0].end > s.spans[0].start for s in sections)
+    assert [s.keys for s in sections] == [["business"]]
