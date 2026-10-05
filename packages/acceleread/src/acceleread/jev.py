@@ -138,7 +138,7 @@ class JevClassifier:
 
     @property
     def capabilities(self) -> Capabilities:
-        return replace(JEV_CAPABILITIES, model=self.model)
+        return replace(JEV_CAPABILITIES, model=self.model, classifier_id="jev")
 
     def _get_client(self) -> ts.AsyncTypeSafeClient:
         if self._client is None:  # created lazily so a missing key fails at first use, not import

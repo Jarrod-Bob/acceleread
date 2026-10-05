@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The Planner: grouping, state, budget, Coverage and cache (docs/spec/v0.md §5.2-§5.3)."""
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from acceleread.classifier import (
     Noul,
     estimate_tokens,
 )
+from acceleread.extract import extract_pdf
 from acceleread.jev import JEV_CAPABILITIES, JevClassifier
 from acceleread.models import (
     ClassifierInfo,
@@ -33,7 +35,6 @@ from acceleread.models import (
 )
 from acceleread.planner import (
     DocumentView,
-    JudgmentSpec,
     judge_document,
     judgment_specs,
     plan_requests,
@@ -46,7 +47,12 @@ CAPS = Capabilities(
     token_budget=1_000,
     chars_per_token=3.0,
     model="m-1",
+    classifier_id="fake",
 )
+TESTS = Path(__file__).parent
+SAMPLE = TESTS / "fixtures" / "sample.pdf"
+TAXONOMY_FILE = TESTS / "fixtures" / "taxonomy.yaml"
+CASSETTE = json.loads((TESTS / "cassettes" / "jev_sector.json").read_text())
 INFO = ClassifierInfo(id="fake", model="m-1", version="1")
 
 
@@ -97,18 +103,14 @@ class FakeClassifier:
         )
 
 
-def test_estimate_adds_the_per_request_overhead() -> None:
-    state = {"document": {"text": "x" * 290}}  # 314 chars compact
-    asks = {"q": Noul("0123456789")}
-    bare = estimate_tokens(state, asks, CAPS)
-    with_overhead = estimate_tokens(state, asks, replace(CAPS, request_overhead_tokens=220))
-    assert bare == (314 + 10) / 3.0
-    assert with_overhead == bare + 220
-
-
-def test_jev_declares_its_measured_overhead() -> None:
-    # A 2-page fixture estimated 286 tokens against 506 actual (the tracer's finding).
-    assert JEV_CAPABILITIES.request_overhead_tokens >= 200
+def test_a_short_documents_estimate_is_close_to_what_jev_billed() -> None:
+    """Recorded: the 2-page fixture was billed 506 input tokens (it was estimated at 286)."""
+    doc = extract_pdf(SAMPLE)
+    specs = judgment_specs(Taxonomy.from_file(TAXONOMY_FILE).with_other(), [])
+    view = DocumentView(text=doc.text, pages=doc.pages, title=doc.title or "sample")
+    (request,), _ = plan_requests(view, specs, JEV_CAPABILITIES)
+    billed = CASSETTE[0]["response"]["json"]["usage"]["input_tokens"]
+    assert abs(request.coverage.est_tokens - billed) <= 0.15 * billed
 
 
 # --- grouping -------------------------------------------------------------------------------
@@ -269,17 +271,13 @@ async def test_a_second_max_tokens_exceeded_is_an_error_not_a_retry_loop() -> No
     assert [e.code for e in outcome.errors] == ["ClassifierTokensExceeded"]
 
 
-def test_jev_400_max_tokens_exceeded_becomes_the_seams_error() -> None:
+async def test_jev_400_max_tokens_exceeded_becomes_the_seams_error() -> None:
     body = {"detail": {"error_type": "max_tokens_exceeded"}}
     client = ts.AsyncTypeSafeClient(
         api_key="k", transport=httpx2.MockTransport(lambda r: httpx2.Response(400, json=body))
     )
-    import asyncio
-
     with pytest.raises(ClassifierTokensExceeded):
-        asyncio.run(
-            JevClassifier(client=client).judge({"document": {"text": "x"}}, {"q": Noul("?")})
-        )
+        await JevClassifier(client=client).judge({"document": {"text": "x"}}, {"q": Noul("?")})
 
 
 # --- missing Sections -----------------------------------------------------------------------
@@ -392,8 +390,86 @@ async def test_no_cache_means_no_lookups_and_no_writes(ws: Workspace) -> None:
     assert len(fake.calls) == 1  # the --no-cache run wrote nothing
 
 
-def test_judgment_spec_wire_names_never_collide() -> None:
-    assert (
-        JudgmentSpec("taxonomy", Noul("?")).wire_name
-        != JudgmentSpec("x", Noul("?"), is_taxonomy=True).wire_name
+# --- review fixes ---------------------------------------------------------------------------
+
+
+async def test_a_shrunk_request_is_still_a_cache_hit_on_rerun(ws: Workspace) -> None:
+    view = DocumentView(text="y" * 900, title="t")
+    specs = judgment_specs(None, [q("w")])
+    first = FakeClassifier(fail_sizes_over=800)
+    await judge_document(view, specs, first, ws.cache)
+    assert len(first.calls) == 2  # it needed the shrink
+    again = FakeClassifier(fail_sizes_over=800)
+    outcome = await judge_document(view, specs, again, ws.cache)
+    assert again.calls == [] and outcome.usage.cache_hits == 1
+
+
+def test_the_cut_is_measured_in_the_estimates_own_units() -> None:
+    nasty = 'a "quoted"\nline\n' * 200  # every newline and quote is two characters of JSON
+    view = DocumentView(text=nasty, title="t")
+    caps = tiny(300)
+    (request,), _ = plan_requests(view, judgment_specs(None, [q("w")]), caps)
+    asks = {s.wire_name: s.ask for s in request.specs}
+    assert request.coverage.truncated
+    assert estimate_tokens(request.state, asks, caps) <= caps.token_budget
+
+
+def test_the_budget_is_state_plus_the_longest_judgment_not_all_of_them() -> None:
+    one, _ = plan_requests(LONG, judgment_specs(None, [q("a")]), tiny(215))
+    three, _ = plan_requests(LONG, judgment_specs(None, [q("a"), q("b"), q("c")]), tiny(215))
+    kept = lambda r: sum(s.end - s.start for s in r[0].coverage.spans)  # noqa: E731
+    assert kept(three) == kept(one)
+
+
+async def test_a_judgment_the_classifier_did_not_answer_is_an_error() -> None:
+    class Forgetful(FakeClassifier):
+        async def judge(self, state: JSONState, judgments: Mapping[str, Ask]) -> ClassifierResponse:
+            response = await super().judge(state, judgments)
+            return replace(response, results={})
+
+    outcome = await judge_document(BIG, judgment_specs(None, [q("w")]), Forgetful())
+    assert "w" not in outcome.answers
+    assert [(e.stage, e.code) for e in outcome.errors] == [("classify", "missing_result")]
+
+
+def test_a_section_with_several_keys_is_read_once() -> None:
+    both = Section(
+        keys=["business", "risk_factors"],
+        label="Items 1 and 1A",
+        spans=[Span(start=0, end=100)],
+        method="regex",
     )
+    view = DocumentView(text="Z" * 100, sections=[both])
+    (request,), _ = plan_requests(
+        view, judgment_specs(None, [q("s", ["business", "risk_factors"])]), CAPS
+    )
+    assert request.coverage.spans == [Span(start=0, end=100)]
+    assert str(request.state).count("Z" * 100) == 1
+
+
+async def test_a_cache_needs_to_know_the_model_and_classifier(ws: Workspace) -> None:
+    anonymous = FakeClassifier(replace(CAPS, model=""))
+    with pytest.raises(ValueError, match="model"):
+        await judge_document(BIG, judgment_specs(None, [q("a")]), anonymous, ws.cache)
+
+
+async def test_two_classifiers_with_one_model_name_do_not_share_cache_entries(
+    ws: Workspace,
+) -> None:
+    specs = judgment_specs(None, [q("a")])
+    await judge_document(BIG, specs, FakeClassifier(), ws.cache)
+    other = FakeClassifier(replace(CAPS, classifier_id="other"))
+    await judge_document(BIG, specs, other, ws.cache)
+    assert len(other.calls) == 1
+
+
+async def test_a_pointer_section_is_reported_with_where_it_points() -> None:
+    pointer = section("controls", 0, 100, flags=["pointer"], form_ref="Exhibit 13")
+    view = DocumentView(text="A" * 100, sections=[pointer])
+    outcome = await judge_document(
+        view, judgment_specs(None, [q("c", ["controls"])]), FakeClassifier()
+    )
+    skipped = outcome.answers["c"]
+    assert isinstance(skipped, SkippedAnswer)
+    assert "pointer → Exhibit 13" in (skipped.coverage.note or "")
+    assert "pointer → Exhibit 13" in skipped.skipped

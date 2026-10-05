@@ -9,8 +9,9 @@ once when the Classifier says the state is too big. Nothing here logs Document t
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from acceleread.classifier import (
@@ -24,6 +25,8 @@ from acceleread.classifier import (
     JudgmentResult,
     Noul,
     Score,
+    ask_chars,
+    ask_definition,
     estimate_tokens,
 )
 from acceleread.models import (
@@ -45,8 +48,15 @@ HEAD_SHARE = 0.25
 SHRINK_FACTOR = 0.85  # the state shrinks by 15% on max_tokens_exceeded
 ELISION = "\n[…]\n"
 JOIN = "\n\n"  # between the pieces of one Section key
-MIN_SECTION_CONFIDENCE = 0.5
+
+# Starting values awaiting user confirmation (spec spirit of §14: to be measured, not decided).
+# A Section is "missing" for `reads` when it is flagged `pointer`, its Verification status is
+# `rejected`, or its confidence is below MIN_SECTION_CONFIDENCE. A Judgment reading several keys
+# counts as missing (skips, or falls back) when ANY of its keys is missing.
+POINTER_FLAG = "pointer"
 UNUSABLE_VERIFICATION = frozenset({"rejected"})
+MIN_SECTION_CONFIDENCE = 0.5
+
 QUESTION_PREFIX = "q_"  # wire names: a Question can never collide with the Taxonomy's `taxonomy`
 TAXONOMY_WIRE_NAME = "taxonomy"
 
@@ -116,7 +126,7 @@ def judgment_specs(taxonomy: Taxonomy | None, questions: Sequence[Question]) -> 
 
 def usable(section: Section) -> bool:
     """A Section exists for `reads` unless it is a pointer, failed Verification or is doubtful."""
-    if "pointer" in section.flags:
+    if POINTER_FLAG in section.flags:
         return False
     if section.verification is not None and section.verification.status in UNUSABLE_VERIFICATION:
         return False
@@ -130,13 +140,13 @@ class Request:
     specs: list[JudgmentSpec]
     reads: tuple[str, ...] | None
     state: dict[str, JSONValue]
-    coverage: Coverage  # the group's, before the Judgment's own est_tokens
+    coverage: Coverage  # the group's; each Judgment copies it with its own input_tokens and note
     notes: dict[str, str] = field(default_factory=dict)  # wire name → why it fell back
     text_chars: int = 0
 
 
 @dataclass(frozen=True)
-class _Segment:
+class _Extent:
     key: str | None
     start: int
     end: int
@@ -167,26 +177,26 @@ def _snap_tail(pages: Sequence[Page], start: int, end: int) -> int:
 
 
 def _cut(
-    view: DocumentView, segments: list[_Segment], max_chars: int
-) -> tuple[list[tuple[_Segment, list[tuple[int, int]]]], bool]:
-    """Keep the spans of each segment that fit `max_chars` in all, ~25% head and ~75% tail."""
-    total = sum(s.end - s.start for s in segments)
-    max_chars -= len(JOIN) * len(segments)
-    if total <= max_chars:
-        return [(s, [(s.start, s.end)]) for s in segments], False
-    kept: list[tuple[_Segment, list[tuple[int, int]]]] = []
-    for seg in segments:
-        length = seg.end - seg.start
+    view: DocumentView, extents: list[_Extent], max_chars: int
+) -> tuple[list[tuple[_Extent, list[tuple[int, int]]]], bool]:
+    """Keep the spans of each extent that fit `max_chars` in all, ~25% head and ~75% tail."""
+    total = sum(e.end - e.start for e in extents)
+    max_chars -= len(JOIN) * len(extents)
+    if total == 0 or total <= max_chars:
+        return [(e, [(e.start, e.end)]) for e in extents], False
+    kept: list[tuple[_Extent, list[tuple[int, int]]]] = []
+    for ext in extents:
+        length = ext.end - ext.start
         allowed = max(0, int(max_chars * length / total) - len(ELISION))
         head = int(allowed * HEAD_SHARE)
         tail = allowed - head
         if allowed >= length:
-            kept.append((seg, [(seg.start, seg.end)]))
+            kept.append((ext, [(ext.start, ext.end)]))
             continue
-        head_end = _snap_head(view.pages, seg.start, seg.start + head) if head else seg.start
-        tail_start = _snap_tail(view.pages, seg.end - tail, seg.end) if tail else seg.end
-        spans = [(a, b) for a, b in ((seg.start, head_end), (tail_start, seg.end)) if b > a]
-        kept.append((seg, spans))
+        head_end = _snap_head(view.pages, ext.start, ext.start + head) if head else ext.start
+        tail_start = _snap_tail(view.pages, ext.end - tail, ext.end) if tail else ext.end
+        spans = [(a, b) for a, b in ((ext.start, head_end), (tail_start, ext.end)) if b > a]
+        kept.append((ext, spans))
     return kept, True
 
 
@@ -202,16 +212,51 @@ def _metadata(view: DocumentView) -> dict[str, JSONValue]:
     return document
 
 
-def _segments(view: DocumentView, reads: tuple[str, ...] | None) -> list[_Segment]:
+def _extents(view: DocumentView, reads: tuple[str, ...] | None) -> list[_Extent]:
+    """What to read. A Section carrying several keys is read once, under the first key read."""
     if reads is None:
-        return [_Segment(None, 0, len(view.text))]
-    return [
-        _Segment(key, span.start, span.end)
-        for key in reads
-        for section in view.sections
-        if key in section.keys and usable(section)
-        for span in section.spans
-    ]
+        return [_Extent(None, 0, len(view.text))]
+    extents: list[_Extent] = []
+    for section in view.sections:
+        key = next((k for k in reads if k in section.keys), None)
+        if key is not None and usable(section):
+            extents += [_Extent(key, span.start, span.end) for span in section.spans]
+    return extents
+
+
+@dataclass(frozen=True)
+class _Rendered:
+    state: dict[str, JSONValue]
+    spans: list[Span]
+    truncated: bool
+    text_chars: int
+
+
+def _render(
+    view: DocumentView, extents: list[_Extent], reads: tuple[str, ...] | None, max_chars: int
+) -> _Rendered:
+    kept, truncated = _cut(view, extents, max_chars)
+    by_key: dict[str | None, list[str]] = {}
+    for ext, pieces in kept:
+        by_key.setdefault(ext.key, []).append(_text_of(view, pieces))
+    joined = {key: JOIN.join(parts) for key, parts in by_key.items()}
+    document = _metadata(view)
+    if reads is None:
+        document["text"] = joined.get(None, "")
+    else:
+        document["sections"] = {key: joined[key] for key in reads if key in joined}
+    return _Rendered(
+        state={"document": document},
+        spans=[Span(start=a, end=b) for _, pieces in kept for a, b in pieces],
+        truncated=truncated,
+        text_chars=sum(len(text) for text in joined.values()),
+    )
+
+
+def _longest(asks: dict[str, Ask]) -> dict[str, Ask]:
+    """The limit covers the state plus the longest Judgment (spec §5.3), not every Judgment."""
+    name = max(asks, key=lambda n: ask_chars(asks[n]))
+    return {name: asks[name]}
 
 
 def _build(
@@ -223,42 +268,36 @@ def _build(
     shrink_from: int | None = None,
 ) -> Request:
     """Build one group's state. `shrink_from` is the text size a previous attempt sent."""
-    segments = _segments(view, reads)
+    extents = _extents(view, reads)
     asks = {s.wire_name: s.ask for s in specs}
-    shell: dict[str, JSONValue] = {"document": {**_metadata(view)}}
-    shell_doc = shell["document"]
-    assert isinstance(shell_doc, dict)
-    if reads is None:
-        shell_doc["text"] = ""
-    else:
-        shell_doc["sections"] = {key: "" for key in reads}
-    available = caps.token_budget - estimate_tokens(shell, asks, caps)
-    max_chars = max(0, int(available * caps.chars_per_token))
+    budgeted = _longest(asks)
+    empty = _render(view, [replace(e, end=e.start) for e in extents], reads, 0)
+    room = caps.token_budget - estimate_tokens(empty.state, budgeted, caps)
+    max_chars = max(0, int(room * caps.chars_per_token))
     if shrink_from is not None:
         max_chars = min(max_chars, int(shrink_from * SHRINK_FACTOR))
-    kept, truncated = _cut(view, segments, max_chars)
-    spans = [Span(start=a, end=b) for _, pieces in kept for a, b in pieces]
-    document = _metadata(view)
-    if reads is None:
-        document["text"] = _text_of(view, kept[0][1])
-        text_chars = len(str(document["text"]))
-    else:
-        by_key: dict[str, list[str]] = {key: [] for key in reads}
-        for seg, pieces in kept:
-            assert seg.key is not None
-            by_key[seg.key].append(_text_of(view, pieces))
-        document["sections"] = {key: JOIN.join(parts) for key, parts in by_key.items()}
-        text_chars = sum(len(JOIN.join(parts)) for parts in by_key.values())
-    state: dict[str, JSONValue] = {"document": document}
+    while True:
+        rendered = _render(view, extents, reads, max_chars)
+        excess = estimate_tokens(rendered.state, budgeted, caps) - caps.token_budget
+        if excess <= 0 or max_chars == 0:  # measured in the estimate's own units (JSON escapes)
+            break
+        max_chars = max(0, max_chars - math.ceil(excess * caps.chars_per_token))
     coverage = Coverage(
         sections=[] if reads is None else list(reads),
-        spans=spans,
-        page_ranges=_pages_in(view.pages, spans),
-        truncated=truncated or shrink_from is not None,
+        spans=rendered.spans,
+        page_ranges=_pages_in(view.pages, rendered.spans),
+        truncated=rendered.truncated or shrink_from is not None,
         shrunk=shrink_from is not None,
-        est_tokens=round(estimate_tokens(state, asks, caps)),
+        est_tokens=round(estimate_tokens(rendered.state, asks, caps)),
     )
-    return Request(specs, reads, state, coverage, text_chars=text_chars)
+    return Request(specs, reads, rendered.state, coverage, text_chars=rendered.text_chars)
+
+
+def _missing_reason(view: DocumentView, key: str) -> str:
+    for section in view.sections:
+        if key in section.keys and POINTER_FLAG in section.flags:
+            return f"{key} (pointer → {section.form_ref or section.label})"
+    return key
 
 
 def plan_requests(
@@ -273,7 +312,7 @@ def plan_requests(
         reads = None if spec.reads is None else tuple(sorted(set(spec.reads)))
         missing = [] if reads is None else [k for k in reads if k not in present]
         if missing:
-            reason = "missing section: " + ", ".join(missing)
+            reason = "missing section: " + ", ".join(_missing_reason(view, k) for k in missing)
             if not spec.fallback:
                 skipped[spec.name] = SkippedAnswer(
                     skipped=reason, coverage=Coverage(est_tokens=0, note=reason)
@@ -290,20 +329,15 @@ def plan_requests(
     return requests, skipped
 
 
-def _ask_definition(ask: Ask) -> dict[str, Any]:
-    match ask:
-        case Score(instructions=instructions, criteria=criteria):
-            return {"kind": "score", "instructions": instructions, "criteria": list(criteria)}
-        case Choice(instructions=instructions, options=options):
-            return {"kind": "choice", "instructions": instructions, "options": dict(options)}
-        case _:
-            return {"kind": "noul", "instructions": ask.instructions}
-
-
-def cache_key(state: dict[str, JSONValue], ask: Ask, model: str) -> str:
-    """hash(state, Judgment definition, model version) (spec §5.3)."""
+def cache_key(state: dict[str, JSONValue], ask: Ask, caps: Capabilities) -> str:
+    """hash(state, Judgment definition, Classifier and model version) (spec §5.3)."""
     payload = json.dumps(
-        {"state": state, "judgment": _ask_definition(ask), "model": model},
+        {
+            "state": state,
+            "judgment": ask_definition(ask),
+            "classifier": caps.classifier_id,
+            "model": caps.model,
+        },
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -366,10 +400,8 @@ async def _call(
 ) -> tuple[Request, ClassifierResponse]:
     """One Classifier call for the uncached Judgments, shrinking and retrying once if too big."""
     caps = classifier.capabilities
-    state = request.state
-    # The state is shared; the Coverage of an unshrunk request is already on `request`.
     try:
-        return request, await classifier.judge(state, {m.wire_name: m.ask for m in misses})
+        return request, await classifier.judge(request.state, {m.wire_name: m.ask for m in misses})
     except ClassifierTokensExceeded:
         shrunk = _build(
             view,
@@ -395,13 +427,15 @@ async def judge_document(
     `ClassifierRejected`) and leaves the Document's other groups alone.
     """
     caps = classifier.capabilities
+    if cache is not None and not (caps.model and caps.classifier_id):
+        raise ValueError("the Judgment cache needs the Classifier's model and id to key entries")
     requests, skipped = plan_requests(view, specs, caps)
     outcome = Outcome(answers=dict(skipped))
     for request in requests:
         hits: dict[str, tuple[JudgmentResult, ClassifierInfo]] = {}
         misses: list[JudgmentSpec] = []
         for spec in request.specs:
-            raw = cache.get(cache_key(request.state, spec.ask, caps.model)) if cache else None
+            raw = cache.get(cache_key(request.state, spec.ask, caps)) if cache else None
             if raw is not None:
                 hits[spec.wire_name] = _from_cache(raw)
             else:
@@ -433,10 +467,18 @@ async def judge_document(
                 )
                 if cache is not None:
                     cache.put(
-                        cache_key(used.state, spec.ask, caps.model),
+                        cache_key(request.state, spec.ask, caps),  # the unshrunk state: reruns hit
                         _to_cache(result, response.info),
                     )
             else:
+                if response is not None:
+                    outcome.errors.append(
+                        RecordError(
+                            stage="classify",
+                            code="missing_result",
+                            message=f"the Classifier gave no result for {spec.name}",
+                        )
+                    )
                 continue
             if spec.is_taxonomy:
                 outcome.classification = judgment

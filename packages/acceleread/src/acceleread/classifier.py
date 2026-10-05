@@ -8,7 +8,7 @@ Coverage, caching, Escalation) lives above this seam, so implementations stay sm
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from acceleread.models import ClassifierInfo
 
@@ -52,15 +52,25 @@ class Capabilities:
     chars_per_token: float  # conservative estimate used before sending
     request_overhead_tokens: int = 0  # fixed cost the Classifier adds to every request
     model: str = ""  # the model version, part of every Judgment cache key
+    classifier_id: str = ""  # which Classifier, so two with one model name never share entries
+
+
+def ask_definition(ask: Ask) -> dict[str, Any]:
+    """A Judgment's definition as plain data: what the cache keys on and the estimate counts."""
+    match ask:
+        case Score(instructions=instructions, criteria=criteria):
+            return {"kind": "score", "instructions": instructions, "criteria": list(criteria)}
+        case Choice(instructions=instructions, options=options):
+            return {"kind": "choice", "instructions": instructions, "options": dict(options)}
+        case Noul(instructions=instructions):
+            return {"kind": "noul", "instructions": instructions}
 
 
 def ask_chars(ask: Ask) -> int:
-    chars = len(ask.instructions)
-    match ask:
-        case Score(criteria=criteria):
-            chars += sum(len(c) for c in criteria)
-        case Choice(options=options):
-            chars += sum(len(k) + len(v or "") for k, v in options.items())
+    definition = ask_definition(ask)
+    chars = len(definition["instructions"])
+    chars += sum(len(c) for c in definition.get("criteria", ()))
+    chars += sum(len(k) + len(v or "") for k, v in definition.get("options", {}).items())
     return chars
 
 
