@@ -13,11 +13,12 @@ from typing import Any, Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from acceleread.pricing import PRICE_TABLE_VERSION as PRICE_TABLE_VERSION  # manifest records it
+
 SCHEMA_VERSION = "0.1.0"
 DEFAULT_JEV_MODEL = "jev-1.13.0"
 DEFAULT_ESCALATION_MODEL = "claude-opus-5-5"
 DEFAULT_ESCALATION_MAX = 0.02  # share of a Job's Documents that may be escalated
-PRICE_TABLE_VERSION = "unpriced-0"  # placeholder until the versioned price table exists
 OTHER = "other"
 
 type ExtractionProfile = Literal["fast", "quality"]

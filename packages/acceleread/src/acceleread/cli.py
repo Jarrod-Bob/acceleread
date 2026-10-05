@@ -2,21 +2,17 @@
 """Command-line entry point (docs/spec/v0.md §9). The tracer ships `run`; more commands follow."""
 
 import argparse
-import asyncio
 import re
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import TextIO
 
 from acceleread import __version__
 from acceleread.classifier import Classifier
 from acceleread.doctor import report, run_checks
 from acceleread.jev import JevClassifier
+from acceleread.jobcli import JOB_COMMANDS, add_job_commands, dispatch
 from acceleread.languages import LanguagePackError, add_language, workspace_tessdata
-from acceleread.models import DEFAULT_JEV_MODEL, JobSpec, Taxonomy
-from acceleread.pipeline import run
-from acceleread.workers import WorkerSettings
 from acceleread.workspace import (
     JobRunningError,
     NetworkFilesystemError,
@@ -27,16 +23,6 @@ from acceleread.workspace import (
 
 def make_classifier(model: str) -> Classifier:
     return JevClassifier(model=model)
-
-
-async def _run(spec: JobSpec, out: TextIO, workers: WorkerSettings) -> int:
-    failed = 0
-    async for record in run(spec, make_classifier(spec.model), workers):
-        out.write(record.model_dump_json(exclude_none=True) + "\n")
-        out.flush()
-        failed += record.status != "ok"
-        print(f"{record.source.filename}: {record.status}", file=sys.stderr)
-    return 1 if failed else 0
 
 
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
@@ -121,10 +107,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="allow a Workspace on NFS or SMB, where SQLite WAL is unsafe",
     )
+    parser.add_argument(
+        "--server",
+        metavar="URL",
+        help="send Job commands to this acceleread server instead of running in-process",
+    )
     commands = parser.add_subparsers(dest="command")
 
     jobs_cmd = commands.add_parser("jobs", help="manage Jobs in the Workspace")
-    jobs = jobs_cmd.add_subparsers(dest="jobs_command", required=True)
+    jobs_cmd.add_argument("--all", action="store_true", help="include single-Document ingests")
+    jobs = jobs_cmd.add_subparsers(dest="jobs_command")  # no sub-command lists the Jobs
     delete_cmd = jobs.add_parser("delete", help="delete a Job's directory (refused while running)")
     delete_cmd.add_argument("job_id")
     prune_cmd = jobs.add_parser("prune", help="free disk from finished Jobs")
@@ -147,28 +139,18 @@ def main(argv: list[str] | None = None) -> int:
     add_lang.add_argument("--from-file", type=Path, help="install this .traineddata, no download")
     commands.add_parser("doctor", help="report Tesseract, language packs, models and extras")
 
-    run_cmd = commands.add_parser("run", help="ingest Documents and print Records as JSONL")
-    run_cmd.add_argument("inputs", nargs="+", type=Path, help="PDF files")
-    run_cmd.add_argument("--taxonomy", type=Path, required=True, help="Taxonomy YAML or JSON")
-    run_cmd.add_argument("--model", default=DEFAULT_JEV_MODEL, help="Jev model")
-    run_cmd.add_argument("-o", "--output", type=Path, help="write JSONL here instead of stdout")
-
-    run_cmd.add_argument("--ocr-workers", type=int, help="extraction workers (default: by Profile)")
-    run_cmd.add_argument("--threads-per-worker", type=int, help="threads per extraction worker")
+    add_job_commands(commands)
 
     args = parser.parse_args(argv)
+    if args.command == "jobs" and args.jobs_command is None:
+        return dispatch(args, make_classifier)
     if args.command in ("jobs", "cache"):
         return _housekeeping(args)
     if args.command == "ocr":
         return _add_language(args)
     if args.command == "doctor":
         return _doctor(args)
-    if args.command != "run":
-        parser.print_help()
-        return 0
-    spec = JobSpec(inputs=args.inputs, taxonomy=Taxonomy.from_file(args.taxonomy), model=args.model)
-    workers = WorkerSettings(args.ocr_workers, args.threads_per_worker)
-    if args.output:
-        with args.output.open("w", encoding="utf-8") as out:
-            return asyncio.run(_run(spec, out, workers))
-    return asyncio.run(_run(spec, sys.stdout, workers))
+    if args.command in JOB_COMMANDS:
+        return dispatch(args, make_classifier)
+    parser.print_help()
+    return 0
