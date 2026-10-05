@@ -14,7 +14,7 @@ from acceleread.classifier import Capabilities
 from acceleread.cli import main
 from acceleread.extract import extract_pdf
 from acceleread.jev import JevClassifier
-from acceleread.pipeline import plan, taxonomy_choice
+from acceleread.planner import DocumentView, judgment_specs, plan_requests
 
 TESTS = Path(__file__).parent
 SAMPLE = TESTS / "fixtures" / "sample.pdf"
@@ -57,10 +57,11 @@ def test_plan_cuts_head_and_tail_when_over_budget() -> None:
     tiny = Capabilities(
         kinds=frozenset({"choice"}), max_choice_options=255, token_budget=150, chars_per_token=3.0
     )
-    choice = taxonomy_choice(Taxonomy.from_file(TAXONOMY).with_other())
-    planned = plan(doc, "t", choice, tiny)
-    text = planned.state["document"]["text"]  # type: ignore[index]
-    assert planned.coverage.truncated
+    specs = judgment_specs(Taxonomy.from_file(TAXONOMY).with_other(), [])
+    view = DocumentView(text=doc.text, pages=doc.pages, title="t")
+    (request,), _ = plan_requests(view, specs, tiny)
+    text = request.state["document"]["text"]  # type: ignore[index]
+    assert request.coverage.truncated
     assert text.startswith("NORTHWIND") and text.endswith("next year.")
     assert "[…]" in text and len(text) < len(doc.text)
 

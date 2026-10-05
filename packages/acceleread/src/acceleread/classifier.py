@@ -5,9 +5,10 @@ A Classifier answers a set of named Judgments about one state. Planning (groupin
 Coverage, caching, Escalation) lives above this seam, so implementations stay small.
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from acceleread.models import ClassifierInfo
 
@@ -49,6 +50,41 @@ class Capabilities:
     max_choice_options: int
     token_budget: int  # state plus the longest Judgment
     chars_per_token: float  # conservative estimate used before sending
+    request_overhead_tokens: int = 0  # fixed cost the Classifier adds to every request
+    model: str = ""  # the model version, part of every Judgment cache key
+    classifier_id: str = ""  # which Classifier, so two with one model name never share entries
+
+
+def ask_definition(ask: Ask) -> dict[str, Any]:
+    """A Judgment's definition as plain data: what the cache keys on and the estimate counts."""
+    match ask:
+        case Score(instructions=instructions, criteria=criteria):
+            return {"kind": "score", "instructions": instructions, "criteria": list(criteria)}
+        case Choice(instructions=instructions, options=options):
+            return {"kind": "choice", "instructions": instructions, "options": dict(options)}
+        case Noul(instructions=instructions):
+            return {"kind": "noul", "instructions": instructions}
+
+
+def ask_chars(ask: Ask) -> int:
+    definition = ask_definition(ask)
+    chars = len(definition["instructions"])
+    chars += sum(len(c) for c in definition.get("criteria", ()))
+    chars += sum(len(k) + len(v or "") for k, v in definition.get("options", {}).items())
+    return chars
+
+
+def estimate_tokens(
+    state: JSONState, judgments: Mapping[str, Ask], capabilities: Capabilities
+) -> float:
+    """The one token estimate, shared by the Planner's budget and the rate limiter's charge.
+
+    Characters of state plus each Judgment's instructions and criteria, divided by the
+    Classifier's chars-per-token, plus its fixed per-request overhead.
+    """
+    chars = len(json.dumps(state, separators=(",", ":"), ensure_ascii=False))
+    chars += sum(ask_chars(ask) for ask in judgments.values())
+    return chars / capabilities.chars_per_token + capabilities.request_overhead_tokens
 
 
 @dataclass(frozen=True)
@@ -85,6 +121,13 @@ class ClassifierTransient(ClassifierError):
 
 class ClassifierUnavailable(ClassifierError):
     """A server-side failure (5xx). Persistent ones fail the Document."""
+
+
+class ClassifierTokensExceeded(ClassifierError):
+    """The state was over the Classifier's token limit (400 `max_tokens_exceeded`).
+
+    The Planner shrinks the state and retries once; the rate limiter does not retry it.
+    """
 
 
 class ClassifierRejected(ClassifierError):

@@ -4,6 +4,7 @@
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from importlib.metadata import version
 from typing import cast
 
@@ -17,6 +18,7 @@ from acceleread.classifier import (
     ClassifierRejected,
     ClassifierResponse,
     ClassifierThrottled,
+    ClassifierTokensExceeded,
     ClassifierTransient,
     ClassifierUnavailable,
     JSONState,
@@ -34,6 +36,8 @@ JEV_CAPABILITIES = Capabilities(
     max_choice_options=255,
     token_budget=32_000,
     chars_per_token=3.0,
+    # Measured live: a 2-page Document estimated 286 tokens against 506 actual.
+    request_overhead_tokens=220,
 )
 
 # Published limits (docs/spec/v0.md §7.5); the default ceiling is 80% of them.
@@ -68,6 +72,11 @@ def _retry_after_header(error: ts.TypeSafeAPIError) -> float | None:
         return None
 
 
+def _is_max_tokens_exceeded(body: object) -> bool:
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return isinstance(detail, dict) and detail.get("error_type") == "max_tokens_exceeded"
+
+
 def _translate(error: ts.TypeSafeError) -> ClassifierError | None:
     """Map an SDK failure to a seam error; None means it propagates unchanged."""
     if isinstance(error, ts.TypeSafeRateLimitError):
@@ -80,6 +89,8 @@ def _translate(error: ts.TypeSafeError) -> ClassifierError | None:
             return ClassifierThrottled(_retry_after_header(error))
         if error.status >= 500:
             return ClassifierUnavailable(f"classifier returned {error.status}")
+        if error.status == 400 and _is_max_tokens_exceeded(error.body):
+            return ClassifierTokensExceeded("state over the token limit")
         if error.status == 422:
             return ClassifierRejected(f"classifier rejected the request ({error.status})")
     return None
@@ -127,7 +138,7 @@ class JevClassifier:
 
     @property
     def capabilities(self) -> Capabilities:
-        return JEV_CAPABILITIES
+        return replace(JEV_CAPABILITIES, model=self.model, classifier_id="jev")
 
     def _get_client(self) -> ts.AsyncTypeSafeClient:
         if self._client is None:  # created lazily so a missing key fails at first use, not import

@@ -10,7 +10,6 @@ here logs or stores Document text or Classifier state.
 import asyncio
 import contextvars
 import itertools
-import json
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -20,14 +19,13 @@ from typing import Protocol
 from acceleread.classifier import (
     Ask,
     Capabilities,
-    Choice,
     Classifier,
     ClassifierResponse,
     ClassifierThrottled,
     ClassifierTransient,
     ClassifierUnavailable,
     JSONState,
-    Score,
+    estimate_tokens,
 )
 
 MAX_IN_FLIGHT = 64
@@ -86,25 +84,6 @@ def priority_lane() -> Iterator[None]:
         yield
     finally:
         _priority.reset(token)
-
-
-def _ask_chars(ask: Ask) -> int:
-    chars = len(ask.instructions)
-    match ask:
-        case Score(criteria=criteria):
-            chars += sum(len(c) for c in criteria)
-        case Choice(options=options):
-            chars += sum(len(k) + len(v or "") for k, v in options.items())
-    return chars
-
-
-def estimate_tokens(
-    state: JSONState, judgments: Mapping[str, Ask], chars_per_token: float
-) -> float:
-    """A conservative token estimate for one request, charged before it is sent."""
-    chars = len(json.dumps(state, separators=(",", ":"), ensure_ascii=False))
-    chars += sum(_ask_chars(ask) for ask in judgments.values())
-    return chars / chars_per_token
 
 
 def _backoff(attempt: int) -> float:
@@ -273,7 +252,7 @@ class RateLimitedClassifier:
         self, state: JSONState, judgments: Mapping[str, Ask]
     ) -> ClassifierResponse:
         priority = _priority.get()
-        cost = estimate_tokens(state, judgments, self.capabilities.chars_per_token)
+        cost = estimate_tokens(state, judgments, self.capabilities)
         throttles = transients = unavailable = 0
         while True:
             await self._admit(cost, priority)
