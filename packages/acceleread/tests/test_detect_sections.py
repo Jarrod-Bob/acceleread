@@ -116,3 +116,38 @@ def test_merge_mode_drops_an_identical_section_found_twice() -> None:
     detectors = [StubDetector("a", [same]), StubDetector("b", [twin])]
     found = detect_sections(DetectionInput(text="x" * 100), detectors, merge=True)
     assert [s.method for s in found] == ["stub"]  # the earlier detector's wins
+
+
+def a_span_section(key: str, start: int, end: int, method: str) -> Section:
+    return Section(keys=[key], label=key, spans=[Span(start=start, end=end)], method=method)
+
+
+def merged(*sections: Section) -> list[Section]:
+    detectors = [StubDetector(s.method, [s]) for s in sections]
+    return detect_sections(DetectionInput(text="x" * 5000), detectors, merge=True)
+
+
+def test_merge_collapses_sections_that_start_together_and_share_keys() -> None:
+    """A Docling heading Section and an Item regex Section for the same Item are one Section."""
+    regex = a_span_section("risk_factors", 1000, 2000, "item_regex")
+    heading = a_span_section(
+        "risk_factors", 1012, 1700, "heading_synonym"
+    )  # same heading, later end
+    assert [s.method for s in merged(regex, heading)] == ["item_regex"]  # earlier detector's wins
+
+
+def test_merge_collapses_sections_that_mostly_overlap() -> None:
+    first = a_span_section("mdna", 1000, 2000, "item_regex")
+    second = a_span_section("mdna", 1400, 2000, "heading_synonym")  # 600 of 600 chars inside
+    assert len(merged(first, second)) == 1
+    mostly = a_span_section("mdna", 1000, 1900, "other")  # 900/1000 of the first
+    assert len(merged(first, mostly)) == 1
+
+
+def test_merge_keeps_sections_that_differ_in_keys_or_barely_overlap() -> None:
+    risk = a_span_section("risk_factors", 1000, 2000, "item_regex")
+    assert len(merged(risk, a_span_section("mdna", 1000, 2000, "heading_synonym"))) == 2
+    toc = a_span_section("risk_factors", 100, 160, "heading_synonym")  # a TOC line
+    assert len(merged(risk, toc)) == 2
+    tail = a_span_section("risk_factors", 1900, 4000, "heading_synonym")
+    assert len(merged(risk, tail)) == 2

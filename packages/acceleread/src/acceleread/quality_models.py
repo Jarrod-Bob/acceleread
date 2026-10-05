@@ -3,18 +3,27 @@
 
 `acceleread models fetch` downloads the weights Docling needs into `<workspace>/models/docling/`,
 the directory Docling's `artifacts_path` reads, so extraction never downloads anything at runtime.
-Each model is pinned to a revision and, where we know them, to file hashes; every file that lands
-is hashed into `manifest.json`. With `ACCELEREAD_OFFLINE=1` fetching is an error (spec §2).
+Every model is pinned to a commit and to the SHA-256 of each file.
 
-Nothing here imports Docling at module level: the base install has neither it nor torch. The real
-downloader imports it when it runs.
+A fetch is all or nothing. Each model is downloaded into a temporary directory beside its final
+place, every hash is checked, and only then are the directories renamed into place and
+`manifest.json` written (atomically, last). Any mismatch leaves the previous install and manifest
+untouched. With `ACCELEREAD_OFFLINE=1` fetching is an error (spec §2).
+
+Extraction asks `check_model` before it uses a weight: a file that is missing or doesn't match its
+pin is never loaded. The answer is cached per process, keyed on the files' size and mtime, so a
+worker does not re-hash 300 MB per Document.
+
+Nothing here imports Docling at module level: the base install has neither it nor torch.
 """
 
 import hashlib
 import json
+import os
 import shutil
+import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -22,6 +31,9 @@ from acceleread.languages import offline
 
 MANIFEST = "manifest.json"
 HF_CACHE_DIR = ".cache"  # huggingface_hub's bookkeeping, not model files
+TEMP_PREFIX = ".fetch-"
+
+type ModelState = Literal["ok", "absent", "corrupt"]
 
 
 class ModelFetchError(Exception):
@@ -30,20 +42,20 @@ class ModelFetchError(Exception):
 
 @dataclass(frozen=True)
 class ModelPin:
-    """One model: where it comes from, at which revision, and the hash of each file we pin.
-
-    `files` maps a path inside `folder` to its SHA-256. An empty mapping means the whole
-    snapshot is fetched and recorded, but not pinned file by file.
-    """
+    """One model: where it comes from, at which revision, and the SHA-256 of every file we use."""
 
     name: str
     source: Literal["hf", "rapidocr"]
     folder: str
     revision: str
+    files: Mapping[str, str]
     label: str = ""
     repo_id: str | None = None
-    files: Mapping[str, str] = field(default_factory=dict)
     optional: bool = False
+
+    def __post_init__(self) -> None:
+        if self.source == "hf" and not self.repo_id:
+            raise ValueError(f"model {self.name!r} comes from Hugging Face and needs a repo_id")
 
 
 PINS: tuple[ModelPin, ...] = (
@@ -86,7 +98,21 @@ PINS: tuple[ModelPin, ...] = (
         source="hf",
         folder="docling-project--docling-models",
         repo_id="docling-project/docling-models",
-        revision="v2.3.0",
+        revision="fc0f2d45e2218ea24bce5045f58a389aed16dc23",  # tag v2.3.0
+        files={
+            "model_artifacts/tableformer/accurate/tableformer_accurate.safetensors": (
+                "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9"
+            ),
+            "model_artifacts/tableformer/accurate/tm_config.json": (
+                "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd"
+            ),
+            "model_artifacts/tableformer/fast/tableformer_fast.safetensors": (
+                "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718"
+            ),
+            "model_artifacts/tableformer/fast/tm_config.json": (
+                "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a"
+            ),
+        },
         optional=True,
     ),
 )
@@ -94,7 +120,7 @@ PINS: tuple[ModelPin, ...] = (
 
 class Downloader(Protocol):
     def hf(self, repo_id: str, revision: str, local_dir: Path, files: list[str]) -> None:
-        """Download `files` (all of the repo when empty) at `revision` into `local_dir`."""
+        """Download `files` at `revision` into `local_dir`."""
 
     def rapidocr(self, local_dir: Path) -> None:
         """Download the PP-OCR latin ONNX models into `local_dir`."""
@@ -107,10 +133,7 @@ class DoclingDownloader:
         from huggingface_hub import snapshot_download
 
         snapshot_download(
-            repo_id=repo_id,
-            revision=revision,
-            local_dir=local_dir,
-            allow_patterns=files or None,
+            repo_id=repo_id, revision=revision, local_dir=local_dir, allow_patterns=files
         )
 
     def rapidocr(self, local_dir: Path) -> None:
@@ -136,45 +159,66 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _files(root: Path, pin: ModelPin) -> list[Path]:
-    folder = root / pin.folder
-    if not folder.is_dir():
-        return []
-    return sorted(
-        p
-        for p in folder.rglob("*")
-        if p.is_file() and HF_CACHE_DIR not in p.relative_to(folder).parts
-    )
+_cache: dict[tuple[Any, ...], ModelState] = {}
 
 
-def _verified(root: Path, pin: ModelPin) -> bool:
-    """Every pinned file is present with the pinned hash (and something is there, if none are)."""
-    folder = root / pin.folder
-    if pin.files:
-        return all(
-            (folder / rel).is_file() and _sha256(folder / rel) == digest
-            for rel, digest in pin.files.items()
-        )
-    return bool(_files(root, pin))
+def _signature(folder: Path, pin: ModelPin) -> tuple[Any, ...] | None:
+    """Pin identity plus each file's size and mtime; None when a pinned file is missing."""
+    stats = []
+    for rel in sorted(pin.files):
+        try:
+            stat = (folder / rel).stat()
+        except OSError:
+            return None
+        stats.append((rel, stat.st_size, stat.st_mtime_ns))
+    return (str(folder), pin.name, pin.revision, tuple(sorted(pin.files.items())), tuple(stats))
 
 
-def _fetch_one(root: Path, pin: ModelPin, downloader: Downloader) -> dict[str, Any]:
-    folder = root / pin.folder
-    if pin.source == "hf":
-        assert pin.repo_id is not None
-        downloader.hf(pin.repo_id, pin.revision, folder, list(pin.files))
-    else:
-        downloader.rapidocr(folder)
-    shutil.rmtree(folder / HF_CACHE_DIR, ignore_errors=True)
-    for rel, digest in pin.files.items():
-        path = folder / rel
-        if not path.is_file() or _sha256(path) != digest:
-            path.unlink(missing_ok=True)
-            raise ModelFetchError(f"{pin.name}: {rel} is missing or does not match its pinned hash")
+def _state_of(folder: Path, pin: ModelPin) -> ModelState:
+    key = _signature(folder, pin)
+    if key is None:
+        # Missing files: "absent" if nothing of the model is there, else damaged.
+        return "corrupt" if any((folder / rel).exists() for rel in pin.files) else "absent"
+    if key not in _cache:
+        good = all(_sha256(folder / rel) == digest for rel, digest in pin.files.items())
+        _cache[key] = "ok" if good else "corrupt"
+    return _cache[key]
+
+
+def check_model(workspace: Path, pin: ModelPin) -> ModelState:
+    """Whether the Workspace has `pin`'s files, with the pinned hashes.
+
+    `corrupt` covers a truncated, tampered or partly missing install. Cached per process.
+    """
+    return _state_of(models_dir(workspace) / pin.folder, pin)
+
+
+def models_status(workspace: Path, pins: Sequence[ModelPin] | None = None) -> dict[str, bool]:
+    """Whether each model is installed and verified, by name."""
+    return {p.name: check_model(workspace, p) == "ok" for p in (PINS if pins is None else pins)}
+
+
+def _entry(pin: ModelPin) -> dict[str, Any]:
+    """The manifest entry for a verified model: its revision and every file's hash."""
     return {
         "revision": pin.revision,
-        "files": {str(p.relative_to(root)): _sha256(p) for p in _files(root, pin)},
+        "files": {f"{pin.folder}/{rel}": digest for rel, digest in sorted(pin.files.items())},
     }
+
+
+def _download(pin: ModelPin, target: Path, downloader: Downloader) -> None:
+    if pin.source == "hf":
+        assert pin.repo_id  # guaranteed by ModelPin
+        downloader.hf(pin.repo_id, pin.revision, target, sorted(pin.files))
+    else:
+        downloader.rapidocr(target)
+    shutil.rmtree(target / HF_CACHE_DIR, ignore_errors=True)
+    for rel, digest in pin.files.items():
+        path = target / rel
+        if not path.is_file():
+            raise ModelFetchError(f"{pin.name}: {rel} was not downloaded")
+        if _sha256(path) != digest:
+            raise ModelFetchError(f"{pin.name}: {rel} does not match its pinned hash")
 
 
 def fetch_models(
@@ -186,39 +230,37 @@ def fetch_models(
 ) -> dict[str, Any]:
     """Install the pinned models into the Workspace and write `manifest.json`.
 
-    Models already present with the pinned hashes aren't downloaded again. A downloaded file that
-    doesn't match its pin is deleted and fails the fetch, with no manifest written.
+    Models already installed with the pinned hashes aren't downloaded again, and an installed
+    optional model is kept when `tables` is off. Everything that needs downloading is downloaded
+    and verified before anything is replaced; a mismatch raises `ModelFetchError` and leaves the
+    previous install and manifest as they were.
     """
     if offline():
         raise ModelFetchError("ACCELEREAD_OFFLINE=1 forbids downloading models; run without it")
     root = models_dir(workspace)
     root.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {}
-    loader = downloader
-    for pin in PINS if pins is None else pins:
-        installed = _verified(root, pin)
-        if pin.optional and not tables and not installed:
-            continue
-        if installed:
-            manifest[pin.name] = {
-                "revision": pin.revision,
-                "files": {str(p.relative_to(root)): _sha256(p) for p in _files(root, pin)},
-            }
-            continue
-        loader = loader or default_downloader()
-        manifest[pin.name] = _fetch_one(root, pin, loader)
-    (root / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    staged: dict[str, tuple[ModelPin, Path]] = {}
+    scratch = root / f"{TEMP_PREFIX}{uuid.uuid4().hex}"
+    try:
+        for pin in PINS if pins is None else pins:
+            if _state_of(root / pin.folder, pin) == "ok":
+                manifest[pin.name] = _entry(pin)
+            elif not pin.optional or tables:
+                target = scratch / pin.folder  # beside the final place: same filesystem
+                _download(pin, target, downloader or default_downloader())
+                staged[pin.name] = (pin, target)
+                manifest[pin.name] = _entry(pin)
+        for pin, target in staged.values():
+            final = root / pin.folder
+            old = scratch / f"old-{pin.folder}"
+            if final.exists():
+                final.rename(old)
+            target.rename(final)
+        text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / MANIFEST).write_text(text)
+        os.replace(scratch / MANIFEST, root / MANIFEST)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     return manifest
-
-
-def models_status(workspace: Path, pins: Sequence[ModelPin] | None = None) -> dict[str, bool]:
-    """Whether each model is installed, by name. A cheap check: presence, not hashes."""
-    root = models_dir(workspace)
-    status = {}
-    for pin in PINS if pins is None else pins:
-        folder = root / pin.folder
-        if pin.files:
-            status[pin.name] = all((folder / rel).is_file() for rel in pin.files)
-        else:
-            status[pin.name] = bool(_files(root, pin))
-    return status

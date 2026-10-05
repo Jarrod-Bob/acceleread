@@ -7,14 +7,25 @@ are converted together: unflagged runs with OCR off, flagged runs with full-Page
 are off unless asked for. Docling's `section_header` items come back as `Extracted.headings`, the
 heading list the Section detectors read.
 
+The Profile always runs on pinned, hash-verified weights from `acceleread models fetch`
+(`quality_models.py`), online or offline: if they are absent or fail verification the Document
+fails with `ModelsMissing`, and Docling is pointed at the Workspace's directory so it never
+downloads anything itself.
+
 Importing this module is cheap and works without the `[quality]` extra: Docling is imported only
-when a Document is extracted. Weights come from the Workspace (`models fetch`); with
-`ACCELEREAD_OFFLINE=1` a missing weight is an error rather than a download.
+when a Document is extracted. Converters are built once per process and reused.
+
+Limits of what Docling reports:
+- `Extracted.ocr_ms` is the wall time of converting the runs that contain OCR Pages. Docling does
+  not separate OCR from layout analysis inside a run, so it includes both.
+- An item that spans Pages is split between them by the character spans in its provenance.
 """
 
+import importlib
 import importlib.util
 import os
 import time
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -24,17 +35,19 @@ from typing import Any, Final
 
 import pypdfium2 as pdfium
 
+from acceleread import quality_models
 from acceleread.extract import (
     PAGE_SEPARATOR,
     Extracted,
     OcrLanguageUnavailable,
     PageCountsCallback,
+    PageLayer,
     scan_pages,
 )
-from acceleread.languages import RAPIDOCR_CODES, offline
+from acceleread.languages import RAPIDOCR_CODES
 from acceleread.models import Page
 from acceleread.ocr_rule import Step3Hook
-from acceleread.quality_models import PINS, models_dir, models_status
+from acceleread.quality_models import check_model, models_dir
 from acceleread.sections.detector import Heading
 
 RAPIDOCR_BACKEND: Final = "onnxruntime"  # pinned: never `auto`, which can pick a torch backend
@@ -46,7 +59,23 @@ class QualityUnavailable(Exception):
 
 
 class ModelsMissing(Exception):
-    """Model weights are not in the Workspace and offline mode forbids downloading them."""
+    """The pinned model weights are not in the Workspace, or fail their hash check."""
+
+
+@dataclass(frozen=True)
+class DoclingItem:
+    """Text Docling found on one Page, in reading order. `heading_level` is 0-based for headings."""
+
+    page: int
+    text: str
+    heading_level: int | None
+
+
+@dataclass(frozen=True)
+class Assembled:
+    text: str
+    pages: list[Page]
+    headings: list[Heading]
 
 
 def docling_available() -> bool:
@@ -77,28 +106,147 @@ def pipeline_options(
     )
 
 
-def _artifacts_path(workspace: Path | None, tables: bool) -> Path | None:
-    """The Workspace's model directory when it has the weights, else None (Docling's cache).
-
-    Offline, missing weights are an error: nothing may be downloaded at runtime.
-    """
-    if workspace is not None:
-        status = models_status(workspace)
-        needed = [p.name for p in PINS if not p.optional or (tables and p.name == "tables")]
-        if all(status[name] for name in needed):
-            return models_dir(workspace)
-    if offline():
+def _verified_weights(workspace: Path | None, tables: bool) -> Path:
+    """The Workspace's model directory, once every needed weight is present and verified."""
+    if workspace is None:
         raise ModelsMissing(
-            "the quality Profile's models are not installed and ACCELEREAD_OFFLINE=1 forbids "
-            "downloading them; run `acceleread models fetch` first"
+            "the quality Profile needs its model weights in the Workspace; "
+            "run `acceleread models fetch`"
         )
-    return None
+    for pin in quality_models.PINS:
+        if pin.optional and not tables:
+            continue
+        state = check_model(workspace, pin)
+        if state != "ok":
+            problem = "is damaged or incomplete" if state == "corrupt" else "is not installed"
+            fetch = "acceleread models fetch" + (" --tables" if pin.optional else "")
+            raise ModelsMissing(
+                f"the quality Profile's {pin.label} weights {problem}; run `{fetch}`"
+            )
+    return models_dir(workspace)
 
 
-def _text_of(item: Any, doc: Any) -> str:
-    if type(item).__name__ == "TableItem":
-        return str(item.export_to_markdown(doc)).strip()
-    return str(getattr(item, "text", "") or "").strip()
+# One converter per (weights, OCR family, OCR on, tables) for the life of the process: building
+# one loads the models, which costs seconds.
+_converters: dict[tuple[Any, ...], Any] = {}
+
+
+def _new_converter(options: Any) -> Any:
+    from docling.datamodel.base_models import InputFormat
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+    )
+
+
+def _converter(artifacts: Path, languages: Sequence[str], *, ocr: bool, tables: bool) -> Any:
+    key = (
+        str(artifacts),
+        tuple(sorted({RAPIDOCR_CODES.get(c, c) for c in languages})),
+        ocr,
+        tables,
+    )
+    if key not in _converters:
+        _converters[key] = _new_converter(
+            pipeline_options(artifacts, languages, ocr=ocr, tables=tables)
+        )
+    return _converters[key]
+
+
+def reset_converters() -> None:
+    _converters.clear()
+
+
+def docling_items(doc: Any) -> list[DoclingItem]:
+    """A DoclingDocument's text in reading order, one entry per Page each item touches.
+
+    An item whose provenance lists several Pages is cut at the character spans Docling records;
+    when the spans are missing, overlap or all cover the whole text, it goes to its first Page.
+    """
+    # By module, not `from ... import`: mypy sees different exports with and without the extra.
+    types = importlib.import_module("docling_core.types.doc")
+    SectionHeaderItem, TableItem = types.SectionHeaderItem, types.TableItem
+
+    found: list[DoclingItem] = []
+    for item, _ in doc.iterate_items():
+        if not item.prov:
+            continue
+        table = isinstance(item, TableItem)
+        text = (item.export_to_markdown(doc) if table else getattr(item, "text", "")) or ""
+        text = str(text).strip()
+        if not text:
+            continue
+        level = item.level - 1 if isinstance(item, SectionHeaderItem) else None
+        segments = [(item.prov[0].page_no, text)]
+        spans = [tuple(p.charspan) for p in item.prov]
+        usable = (
+            not table
+            and len(spans) > 1
+            and len(set(spans)) == len(spans)
+            and all(0 <= s < e <= len(text) for s, e in spans)
+        )
+        if usable:
+            segments = [
+                (p.page_no, text[s:e].strip()) for p, (s, e) in zip(item.prov, spans, strict=True)
+            ]
+        found += [
+            DoclingItem(page, part, level if i == 0 else None)
+            for i, (page, part) in enumerate(segments)
+            if part
+        ]
+    return found
+
+
+def assemble(
+    layers: Sequence[PageLayer],
+    items: Sequence[DoclingItem],
+    *,
+    languages: Sequence[str],
+    docling_version: str,
+    rapidocr_version: str,
+) -> Assembled:
+    """Place Docling's items into Pages, offsets and headings.
+
+    A Page Docling returned nothing for keeps its pypdfium2 text layer, and its provenance says
+    `pdfium`. An OCR Page is `rapidocr`'s, even when it came back empty.
+    """
+    by_page: dict[int, list[DoclingItem]] = defaultdict(list)
+    for item in items:
+        by_page[item.page].append(item)
+    parts: list[str] = []
+    pages: list[Page] = []
+    headings: list[Heading] = []
+    offset = 0
+    for layer in layers:
+        record = layer.record
+        if parts:
+            offset += len(PAGE_SEPARATOR)
+        start = offset
+        lines: list[str] = []
+        for item in by_page.get(record.number, []):
+            if item.heading_level is not None:
+                headings.append(
+                    Heading(item.text, start + sum(len(x) + 1 for x in lines), item.heading_level)
+                )
+            lines.append(item.text)
+        text = "\n".join(lines)
+        update: dict[str, Any] = {}
+        if layer.needs_ocr:
+            update = {
+                "method": "ocr-full",
+                "engine": "rapidocr",
+                "engine_version": rapidocr_version,
+                "ocr_languages": list(languages),
+            }
+        elif lines:
+            update = {"engine": "docling", "engine_version": docling_version}
+        else:
+            text = layer.text  # Docling found nothing: keep the text layer, say so
+        pages.append(record.model_copy(update=update | {"start": start, "end": start + len(text)}))
+        parts.append(text)
+        offset = start + len(text)
+    return Assembled(PAGE_SEPARATOR.join(parts), pages, headings)
 
 
 @dataclass
@@ -127,7 +275,12 @@ def extract_pdf_quality(
     tables: bool = False,
     on_page_counts: PageCountsCallback | None = None,
 ) -> Extracted:
-    """Extract a PDF with Docling, running OCR only on Pages the OCR rule flags."""
+    """Extract a PDF with Docling, running OCR only on Pages the OCR rule flags.
+
+    Raises `ModelsMissing` unless the Workspace holds hash-verified weights (and TableFormer's,
+    with `tables`), `QualityUnavailable` without the `[quality]` extra, and `OcrLanguageUnavailable`
+    when a Page needs OCR in a language the PP-OCR latin family can't read.
+    """
     languages = list(ocr_languages)
     pdf = pdfium.PdfDocument(path)
     try:
@@ -135,7 +288,7 @@ def extract_pdf_quality(
         title = pdf.get_metadata_dict().get("Title") or None
     finally:
         pdf.close()
-    flags = [ocr_needed for _, _, ocr_needed in layers]
+    flags = [layer.needs_ocr for layer in layers]
     if on_page_counts is not None:
         on_page_counts(len(layers), sum(flags))
     if any(flags):
@@ -144,76 +297,34 @@ def extract_pdf_quality(
                 raise OcrLanguageUnavailable(
                     f"The quality Profile can't OCR {code!r} (PP-OCR latin family only)"
                 )
-    artifacts = _artifacts_path(workspace, tables)
+    artifacts = _verified_weights(workspace, tables)
     if not docling_available():
         raise QualityUnavailable(
             "the quality Profile needs the extra: pip install acceleread[quality]"
         )
-    if artifacts is not None or offline():
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-    from docling.datamodel.base_models import InputFormat
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-
-    converters: dict[bool, Any] = {}
-
-    def convert(run: _Run) -> Any:
-        if run.ocr not in converters:
-            options = pipeline_options(artifacts, languages, ocr=run.ocr, tables=tables)
-            converters[run.ocr] = DocumentConverter(
-                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
-            )
-        result = converters[run.ocr].convert(path, page_range=(run.first, run.last))
-        return result.document
-
-    # Page number -> [(text, heading level or None)] in reading order.
-    items: dict[int, list[tuple[str, int | None]]] = {}
+    items: list[DoclingItem] = []
     ocr_ms = 0
     for run in _runs(flags):
+        converter = _converter(artifacts, languages, ocr=run.ocr, tables=tables)
         started = time.perf_counter()
-        doc = convert(run)
+        result = converter.convert(path, page_range=(run.first, run.last))
         if run.ocr:
             ocr_ms += round((time.perf_counter() - started) * 1000)
-        for item, _ in doc.iterate_items():
-            text = _text_of(item, doc)
-            if not text or not item.prov:
-                continue
-            level = item.level - 1 if type(item).__name__ == "SectionHeaderItem" else None
-            items.setdefault(item.prov[0].page_no, []).append((text, level))
+        items += docling_items(result.document)
 
-    docling_version = version("docling-slim")
-    parts: list[str] = []
-    pages: list[Page] = []
-    headings: list[Heading] = []
-    offset = 0
-    for record, _, ocr_needed in layers:
-        if parts:
-            offset += len(PAGE_SEPARATOR)
-        page_start = offset
-        lines: list[str] = []
-        for text, level in items.get(record.number, []):
-            if level is not None:
-                headings.append(Heading(text, page_start + sum(len(x) + 1 for x in lines), level))
-            lines.append(text)
-        text = "\n".join(lines)
-        update: dict[str, Any] = {"start": page_start, "end": page_start + len(text)}
-        if ocr_needed:
-            update |= {
-                "method": "ocr-full",
-                "engine": "rapidocr",
-                "engine_version": version("rapidocr"),
-                "ocr_languages": languages,
-            }
-        else:
-            update |= {"engine": "docling", "engine_version": docling_version}
-        pages.append(record.model_copy(update=update))
-        parts.append(text)
-        offset = page_start + len(text)
+    assembled = assemble(
+        layers,
+        items,
+        languages=languages,
+        docling_version=version("docling-slim"),
+        rapidocr_version=version("rapidocr") if any(flags) else "",
+    )
     return Extracted(
-        text=PAGE_SEPARATOR.join(parts),
-        pages=pages,
+        text=assembled.text,
+        pages=assembled.pages,
         title=title,
         ocr_pages=sum(flags),
         ocr_ms=ocr_ms,
-        headings=tuple(headings),
+        headings=tuple(assembled.headings),
     )

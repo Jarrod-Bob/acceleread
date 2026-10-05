@@ -151,9 +151,10 @@ class LLMEscalation(_Strict):
 
 
 class DocumentOverride(_Strict):
-    """Per-Document overrides of the Job's Extraction Profile and OCR languages."""
+    """Per-Document overrides of the Job's Extraction Profile, tables and OCR languages."""
 
     extraction_profile: ExtractionProfile | None = None
+    tables: bool | None = None
     ocr_languages: list[str] | None = Field(default=None, min_length=1)
 
 
@@ -171,6 +172,7 @@ class JobSettings(_Strict):
     inputs: list[DocumentInput] = Field(min_length=1)
     questions: list[Question] = Field(default_factory=list)
     extraction_profile: ExtractionProfile = "fast"
+    tables: bool = False  # the `quality` Profile's table structure model; `fast` ignores it
     ocr_languages: list[str] = Field(default_factory=lambda: ["en"], min_length=1)
     overrides: dict[str, DocumentOverride] = Field(default_factory=dict)  # keyed by input path
     escalate_below: float | None = Field(default=None, ge=0, le=1)
@@ -187,6 +189,16 @@ class JobSettings(_Strict):
         if not isinstance(value, list):
             return value
         return [{"source": os.fspath(v)} if isinstance(v, str | os.PathLike) else v for v in value]
+
+    def profile_for(self, source: str | Path) -> ExtractionProfile:
+        """The Extraction Profile for one input: its override when it has one, else the Job's."""
+        override = self.overrides.get(str(source))
+        return (override.extraction_profile if override else None) or self.extraction_profile
+
+    def tables_for(self, source: str | Path) -> bool:
+        """Whether the `quality` Profile runs table structure for one input."""
+        override = self.overrides.get(str(source))
+        return override.tables if override and override.tables is not None else self.tables
 
 
 class JobSpec(JobSettings):

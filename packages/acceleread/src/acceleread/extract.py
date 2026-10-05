@@ -21,7 +21,7 @@ import pypdfium2.raw as pdfium_raw
 from lxml import html
 
 from acceleread.languages import TESSERACT_CODES, pack_file
-from acceleread.models import ExtractionProfile, JobSettings, Page
+from acceleread.models import Page
 from acceleread.ocr_rule import PageSignals, Step3Hook, decide
 from acceleread.sections.detector import Heading
 
@@ -130,12 +130,19 @@ class TesseractOcr:
         self._cleanup.close()
 
 
-def scan_pages(pdf: Any, step3: Step3Hook | None = None) -> list[tuple[Page, str, bool]]:
-    """Each Page's pypdfium2 text layer and the OCR rule's verdict, shared by both Profiles.
+@dataclass(frozen=True)
+class PageLayer:
+    """One Page's pypdfium2 text layer and the OCR rule's verdict on it."""
 
-    Returns (Page record with `start`/`end` still 0, text layer, whether the rule flags the Page).
-    """
-    layers: list[tuple[Page, str, bool]] = []
+    record: Page
+    """The Page record, with `start` and `end` not yet placed."""
+    text: str
+    needs_ocr: bool
+
+
+def scan_pages(pdf: Any, step3: Step3Hook | None = None) -> list[PageLayer]:
+    """Every Page's text layer and OCR verdict, shared by both Profiles."""
+    layers: list[PageLayer] = []
     for number, page in enumerate(pdf, start=1):
         textpage = page.get_textpage()
         layer = textpage.get_text_range().replace("\r\n", "\n").strip()
@@ -151,15 +158,9 @@ def scan_pages(pdf: Any, step3: Step3Hook | None = None) -> list[tuple[Page, str
             ocr_decision=verdict.decision,
             image_coverage=signals.image_coverage,
         )
-        layers.append((record, layer, verdict.ocr))
+        layers.append(PageLayer(record, layer, verdict.ocr))
         page.close()
     return layers
-
-
-def profile_for(settings: JobSettings, source: str | Path) -> ExtractionProfile:
-    """The Extraction Profile for one input: its override when it has one, else the Job's."""
-    override = settings.overrides.get(str(source))
-    return (override.extraction_profile if override else None) or settings.extraction_profile
 
 
 def extract_pdf(
@@ -180,7 +181,7 @@ def extract_pdf(
     ocr: TesseractOcr | None = None
     try:
         layers = scan_pages(pdf, step3)
-        flagged = sum(ocr_needed for _, _, ocr_needed in layers)
+        flagged = sum(layer.needs_ocr for layer in layers)
         if on_page_counts is not None:
             on_page_counts(len(layers), flagged)
 
@@ -188,9 +189,9 @@ def extract_pdf(
         pages: list[Page] = []
         offset = 0
         ocr_ms = 0
-        for record, layer, ocr_needed in layers:
-            text = layer
-            if ocr_needed:
+        for layer in layers:
+            record, text = layer.record, layer.text
+            if layer.needs_ocr:
                 started = time.perf_counter()
                 ocr = ocr or TesseractOcr(languages, tessdata)
                 page = pdf[record.number - 1]

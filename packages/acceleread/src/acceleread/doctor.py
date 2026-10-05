@@ -14,7 +14,7 @@ from typing import Literal
 from acceleread import quality_models
 from acceleread.extract import VENDORED_TESSDATA, tesseract_version
 from acceleread.languages import installed_languages, offline, workspace_tessdata
-from acceleread.quality_models import models_status
+from acceleread.quality_models import check_model
 
 Status = Literal["ok", "absent", "error"]
 EXTRAS = {"quality": ("docling", "rapidocr"), "llm": ("anthropic",), "edgar": ("edgar",)}
@@ -47,17 +47,17 @@ def _packs(workspace: Path, vendored_dir: Path) -> list[Check]:
 
 def _models(workspace: Path) -> list[Check]:
     checks = []
-    status = models_status(workspace)
     for pin in quality_models.PINS:
-        found = status[pin.name]
+        state = check_model(workspace, pin)
         hint = "`acceleread models fetch" + (" --tables`" if pin.optional else "`")
-        checks.append(
-            Check(
-                f"models: {pin.label}",
-                "ok" if found else "absent",
-                "installed" if found else f"absent ({hint})",
+        if state == "ok":
+            checks.append(Check(f"models: {pin.label}", "ok", "installed, hashes verified"))
+        elif state == "corrupt":
+            checks.append(
+                Check(f"models: {pin.label}", "error", f"damaged or incomplete; run {hint}")
             )
-        )
+        else:
+            checks.append(Check(f"models: {pin.label}", "absent", f"absent ({hint})"))
     return checks
 
 
